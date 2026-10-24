@@ -14,6 +14,8 @@ enum {
     WM_APP_TASKS,             // a new task manager sample (tasks.cpp)
     WM_APP_ICONS,             // icons of programs and shortcuts in a folder just listed (folder.cpp)
     WM_APP_CHANGED,           // something changed in the folder a window shows (SHChangeNotifyRegister)
+    WM_APP_THUMB,             // a thumbnail made (thumbs.cpp)
+    WM_APP_KEYS,              // Win+E or Ctrl+Shift+Esc (keys.cpp)
 };
 
 enum Tab { TAB_FILES, TAB_TASKS };
@@ -29,6 +31,7 @@ struct WindowSpec {
 void window_open(const WindowSpec &spec);
 int window_count();
 void window_focus_last();                  // brings the last used window to the front
+bool window_focus_tasks();                 // the task manager already open somewhere: to the front (false if none)
 std::vector<WindowSpec> window_specs();    // the open windows, oldest first
 void window_close_all();
 void window_update_changed();              // the update state changed: repaint the notices

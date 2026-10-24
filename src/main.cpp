@@ -9,16 +9,22 @@
 //                                      there was one, 0 if not
 //   explorer-lite.exe --updated        after an update: reopens the windows that were open
 //   explorer-lite.exe --cmd "<verb> <arg>"   a test command for the running one: shot <png>, go <folder>, search <text>,
-//                                      key <vk>, select <name>, newtab <folder>, tasks, taskpage <n>, size <w>x<h>, closeall
-//   explorer-lite.exe --unregister     undoes what explorer-lite registered for this user (uninstaller)
+//                                      key <vk>, select <name>, newtab <folder>, tasks, taskpage <n>, size <w>x<h>, closeall,
+//                                      newfolder, rename <name>, copyto|moveto <folder>, delete [permanent], view icons|details
+//   explorer-lite.exe --unregister     undoes what explorer-lite registered for this user (uninstaller): Start
+//                                      with Windows and the folders' open verb
+//   explorer-lite.exe --everything <folder> <text>   a search through Everything, its results to the log (tests:
+//                                      Everything only answers windows on its own desktop, and this needs none)
 //   --instance <name>                  its own data folder, mutex and window classes (tests)
 #include "app.h"
 #include <shellapi.h>
 #include <cstring>
 #include <cwchar>
 #include "conf.h"
+#include "folder.h"
 #include "gfx.h"
 #include "idioma.h"
+#include "keys.h"
 #include "update.h"
 
 HINSTANCE g_inst;
@@ -42,8 +48,8 @@ std::wstring run_value() { return L"explorer-lite" + instance_suffix(); }
 // --- the command line ---------------------------------------------------------------------------
 
 struct Command {
-    bool tray = false, tasks = false, quit = false, updated = false, unregister = false;
-    std::wstring path, cmd;
+    bool tray = false, tasks = false, quit = false, updated = false, unregister = false, everything = false;
+    std::wstring path, cmd, text;
 };
 
 Command parse(int argc, wchar_t **argv) {
@@ -57,6 +63,11 @@ Command parse(int argc, wchar_t **argv) {
         else if (a == L"--unregister") c.unregister = true;
         else if (a == L"--instance" && i + 1 < argc) set_instance(argv[++i]);
         else if (a == L"--cmd" && i + 1 < argc) c.cmd = argv[++i];
+        else if (a == L"--everything" && i + 2 < argc) {
+            c.everything = true;
+            c.path = argv[++i];
+            c.text = argv[++i];
+        }
         else if (!a.empty() && a[0] != L'-') c.path = a;
     }
     return c;
@@ -202,7 +213,7 @@ void tray_remove() {
     g_tray_added = false;
 }
 
-enum TrayCmd { TC_VERSION = 1, TC_OPEN, TC_TASKS, TC_STARTUP, TC_AUTO, TC_UPDATE, TC_QUIT, TC_LANG = 100 };
+enum TrayCmd { TC_VERSION = 1, TC_OPEN, TC_TASKS, TC_STARTUP, TC_KEYS, TC_FOLDERS, TC_AUTO, TC_UPDATE, TC_QUIT, TC_LANG = 100 };
 
 void tray_menu() {
     HMENU m = CreatePopupMenu();
@@ -233,6 +244,8 @@ void tray_menu() {
     AppendMenuW(m, MF_SEPARATOR, 0, NULL);
     // toggles: a ticked or empty box as the icon (with MNS_CHECKORBMP a check mark would replace the icon)
     add(TC_STARTUP, startup_on() ? L"\xE73A" : L"\xE739", T(L"Start with Windows"), false);
+    add(TC_KEYS, keys_on() ? L"\xE73A" : L"\xE739", T(L"Win+E and Ctrl+Shift+Esc open explorer-lite"), false);
+    add(TC_FOLDERS, folders_on() ? L"\xE73A" : L"\xE739", T(L"Open folders with explorer-lite"), false);
     add(TC_AUTO, update_auto() ? L"\xE73A" : L"\xE739", T(L"Update automatically"), false);
     switch (g_upd.state) {
     case UP_CHECKING: add(TC_UPDATE, L"\xE895", T(L"Checking for updates…"), true); break;
@@ -296,6 +309,8 @@ void tray_menu() {
         break;
     }
     case TC_STARTUP: set_startup(!startup_on()); break;
+    case TC_KEYS: keys_set(!keys_on()); break;
+    case TC_FOLDERS: folders_set(!folders_on()); break;
     case TC_AUTO:
         update_set_auto(!update_auto());
         if (update_auto() && g_upd.state == UP_AVAILABLE) update_download();
@@ -345,6 +360,13 @@ LRESULT CALLBACK host_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         }
         return 0;
     case WM_APP_UPDATE: on_update(); return 0;
+    case WM_APP_KEYS: { // Win+E: a new window, as explorer opens one; Ctrl+Shift+Esc: the task manager
+        if (wp == KEY_TASKS && window_focus_tasks()) return 0;
+        WindowSpec s;
+        if (wp == KEY_TASKS) s.tab = TAB_TASKS;
+        window_open(s);
+        return 0;
+    }
     case WM_TIMER:
         if (wp == kTimerUpdate) {
             SetTimer(h, kTimerUpdate, kCheckEveryMs, NULL);
@@ -420,6 +442,38 @@ int send_to_running(const Command &c) {
     return code;
 }
 
+LRESULT CALLBACK probe_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    if (msg == WM_COPYDATA) {
+        std::vector<Item> items;
+        folder_search_items((COPYDATASTRUCT *)lp, items);
+        std::string line = "everything: " + std::to_string(items.size()) + " results";
+        for (size_t i = 0; i < items.size() && i < 5; i++) line += "; " + utf8(items[i].target) + (items[i].dir ? " (folder)" : " " + utf8(items[i].size));
+        log_line(line);
+        PostQuitMessage(0);
+        return TRUE;
+    }
+    if (msg == WM_TIMER) {
+        log_line("everything: no answer");
+        PostQuitMessage(1);
+    }
+    return DefWindowProcW(h, msg, wp, lp);
+}
+
+// --everything: the search code of the windows, from a message-only window (nothing on screen)
+int everything_probe(const Command &c) {
+    WNDCLASSEXW wc = { sizeof(wc) };
+    wc.lpfnWndProc = probe_proc;
+    wc.hInstance = g_inst;
+    wc.lpszClassName = L"ExplorerLiteProbe";
+    RegisterClassExW(&wc);
+    HWND h = CreateWindowExW(0, wc.lpszClassName, L"", 0, 0, 0, 0, 0, HWND_MESSAGE, NULL, g_inst, NULL);
+    if (!h || !folder_search(h, 1, c.path, c.text)) return 2;
+    SetTimer(h, 1, 5000, NULL);
+    MSG m;
+    while (GetMessageW(&m, NULL, 0, 0) > 0) DispatchMessageW(&m);
+    return (int)m.wParam;
+}
+
 } // namespace
 
 void app_install_update() {
@@ -454,8 +508,10 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     wchar_t **argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     Command cmd = parse(argc, argv);
     LocalFree(argv);
+    if (cmd.everything) return everything_probe(cmd);
     if (cmd.unregister) {
         set_startup(false);
+        folders_set(false);
         return 0;
     }
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
@@ -484,6 +540,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     tray_set(NIM_ADD);
     update_init(g_host, WM_APP_UPDATE);
     SetTimer(g_host, kTimerUpdate, kFirstCheckMs, NULL);
+    keys_start(g_host, WM_APP_KEYS);
     log_line("start " EXPLORER_LITE_VERSION " in " + std::to_string((int)since_process_start_ms()) + " ms");
 
     if (cmd.updated) {
@@ -497,6 +554,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
         TranslateMessage(&m);
         DispatchMessageW(&m);
     }
+    keys_stop();
     OleUninitialize();
     if (mutex) {
         ReleaseMutex(mutex);

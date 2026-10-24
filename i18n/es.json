@@ -77,5 +77,9 @@
  "of {0}": "de {0}",
  "Language": "Idioma",
  "{0} free": "{0} libres",
- "New folder": "Nueva carpeta"
+ "New folder": "Nueva carpeta",
+ "{0} found by Everything": "{0} encontrados por Everything",
+ "Open in explorer-lite": "Abrir en explorer-lite",
+ "Win+E and Ctrl+Shift+Esc open explorer-lite": "Win+E y Ctrl+Shift+Esc abren explorer-lite",
+ "Open folders with explorer-lite": "Abrir las carpetas con explorer-lite"
 }

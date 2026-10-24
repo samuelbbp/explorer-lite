@@ -1,0 +1,26 @@
+# Search: the folder filtered as you type, then everything under it through Everything (if it is running).
+# Everything only answers windows on its own desktop: its part is checked by the probe (the results in the log).
+probe --everything C:\Windows notepad.exe
+conf language=en
+start --tray
+sleep 2000
+send
+sleep 2000
+cmd size 1180x720
+cmd go C:\Windows
+sleep 1500
+cmd search notepad
+sleep 2000
+shot search-windows
+cmd go
+sleep 1000
+cmd search hosts
+sleep 2000
+shot search-home
+mem after-search
+cmd search
+sleep 1500
+shot search-cleared
+cmd closeall
+sleep 1000
+stop

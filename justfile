@@ -37,6 +37,15 @@ build-mac version="": (_cpu "mac")
     mkdir -p build
     mac get {{mac_dir}}/build/explorer-lite.exe build/explorer-lite.exe
 
+# build on the PC when the Mac is busy (its zig in %LOCALAPPDATA%\fp-tools\zig) and bring back build/explorer-lite.exe
+build-pc: (_cpu "windows")
+    python3 i18n/generar.py >/dev/null
+    pc sync . explorer-lite >/dev/null
+    pc ps tools/pc-build.ps1
+    mkdir -p build
+    pc get 'AppData/Local/fp-build/explorer-lite/build/explorer-lite.exe' build/explorer-lite.exe
+    ls -l build/explorer-lite.exe
+
 # installer + zip (+ .sha256) of VERSION into dist/ (CI does this for releases)
 package version: (build version)
     ./package.sh {{version}}

@@ -19,6 +19,7 @@
 #include "idioma.h"
 #include "shellops.h"
 #include "tasks.h"
+#include "thumbs.h"
 #include "update.h"
 
 namespace {
@@ -26,10 +27,12 @@ namespace {
 // layout, in DIPs
 const float kTabH = 34, kToolH = 40, kNavW = 210, kHeadH = 30, kRowH = 28, kStatusH = 26, kScrollW = 10;
 const float kColDate = 150, kColType = 170, kColSize = 110, kNameMin = 180;
+const float kTileW = 124, kTileH = 150, kThumb = 96; // Large icons: a tile, and the picture in it
+const size_t kThumbsKept = 200;                       // thumbnails kept per window (the ones on screen are asked again)
 
 enum Hit {
     H_NONE, H_TAB, H_TAB_CLOSE, H_TAB_NEW, H_BACK, H_FWD, H_UP, H_REFRESH, H_CRUMB, H_ADDRESS, H_NAV, H_HEAD, H_ROW,
-    H_SCROLL, H_LIST, H_UPDATE, H_TASKS,
+    H_SCROLL, H_LIST, H_UPDATE, H_TASKS, H_VIEW,
 };
 
 struct Region {
@@ -47,12 +50,15 @@ struct View {
     int focus = -1, anchor = -1;       // positions in shown
     int sort = COL_NAME;
     bool desc = false;
+    bool grid = false;                 // Large icons (thumbnails) instead of Details
     float scroll = 0;                  // DIPs
     uint64_t gen = 0;                  // the listing this view waits for
     bool loading = false;
     std::wstring error, filter;
     std::wstring select_after;         // after going up: the folder we came from is selected
     bool rename_after = false;         // a new folder: renamed as soon as it shows up
+    bool results = false;              // all holds Everything's results for the search, not the folder
+    DWORD search_id = 0;               // the search whose answer this view waits for
     double list_ms = 0;
     TasksView *tasks = nullptr;
 };
@@ -64,6 +70,9 @@ struct Win {
     ID2D1SolidColorBrush *br = nullptr;
     IDWriteTextFormat *f_ui = nullptr, *f_ui_c = nullptr, *f_small = nullptr, *f_icon = nullptr, *f_icon_s = nullptr, *f_title = nullptr;
     std::unordered_map<int, ID2D1Bitmap *> icons;
+    std::unordered_map<std::wstring, Thumb *> thumbs;          // by target; nullptr = asked, not here yet
+    std::unordered_map<std::wstring, ID2D1Bitmap *> thumb_bmps; // the ones drawn, on the render target
+    uint64_t thumbs_gen = 0;                                   // the listing they belong to
     std::vector<View> views;
     int cur = 0;
     std::vector<Region> regions;
@@ -129,18 +138,41 @@ float name_width(Win *w) {
     return std::max(kNameMin, (l.right - l.left - kScrollW) - kColDate - kColType - kColSize - 16);
 }
 
-float content_h(View &v) { return v.shown.size() * kRowH; }
+bool is_grid(View &v) { return v.grid && v.kind == TAB_FILES; }
+
+// Large icons: tiles per line; Details: one row per line
+int per_line(Win *w, View &v) {
+    if (!is_grid(v)) return 1;
+    D2D1_RECT_F l = list_rect(w);
+    return std::max(1, (int)((l.right - l.left - kScrollW - 8) / kTileW));
+}
+float line_h(View &v) { return is_grid(v) ? kTileH : kRowH; }
+
+float content_h(Win *w, View &v) {
+    int per = per_line(w, v);
+    return ((v.shown.size() + per - 1) / per) * line_h(v);
+}
+
+// where item pos is drawn (DIPs, before the list's clip)
+D2D1_RECT_F item_rect(Win *w, View &v, int pos) {
+    D2D1_RECT_F l = list_rect(w);
+    int per = per_line(w, v);
+    float y = l.top + (pos / per) * line_h(v) - v.scroll;
+    if (!is_grid(v)) return D2D1::RectF(l.left + 4, y + 1, l.right - kScrollW - 2, y + kRowH - 1);
+    float x = l.left + 6 + (pos % per) * kTileW;
+    return D2D1::RectF(x + 2, y + 4, x + kTileW - 2, y + kTileH - 2);
+}
 
 void clamp_scroll(Win *w, View &v) {
     D2D1_RECT_F l = list_rect(w);
-    float max = std::max(0.f, content_h(v) - (l.bottom - l.top));
+    float max = std::max(0.f, content_h(w, v) - (l.bottom - l.top));
     v.scroll = std::min(std::max(v.scroll, 0.f), max);
 }
 
 void ensure_visible(Win *w, View &v, int pos) {
     if (pos < 0) return;
     D2D1_RECT_F l = list_rect(w);
-    float top = pos * kRowH, bottom = top + kRowH, h = l.bottom - l.top;
+    float top = (pos / per_line(w, v)) * line_h(v), bottom = top + line_h(v), h = l.bottom - l.top;
     if (top < v.scroll) v.scroll = top;
     else if (bottom > v.scroll + h) v.scroll = bottom - h;
     clamp_scroll(w, v);
@@ -239,6 +271,41 @@ ID2D1Bitmap *icon_bitmap(Win *w, int index) {
     return bmp;
 }
 
+void forget_thumbs(Win *w) {
+    for (auto &kv : w->thumbs) delete kv.second;
+    for (auto &kv : w->thumb_bmps) release(kv.second);
+    w->thumbs.clear();
+    w->thumb_bmps.clear();
+}
+
+// before a frame of tiles: another folder, or too many kept, and they start again (never in the middle of a frame)
+void prepare_thumbs(Win *w, View &v) {
+    if (w->thumbs_gen == v.gen && w->thumbs.size() <= kThumbsKept) return;
+    if (w->thumbs_gen != v.gen) thumbs_cancel(w->thumbs_gen);
+    forget_thumbs(w);
+    w->thumbs_gen = v.gen;
+}
+
+// the thumbnail of an item on screen: drawn if here, asked for otherwise
+ID2D1Bitmap *thumb_bitmap(Win *w, View &v, const Item &it) {
+    auto b = w->thumb_bmps.find(it.target);
+    if (b != w->thumb_bmps.end()) return b->second;
+    auto t = w->thumbs.find(it.target);
+    if (t == w->thumbs.end()) {
+        w->thumbs[it.target] = nullptr;
+        thumbs_request(w->hwnd, v.gen, it.target, (int)std::lround(kThumb * scale(w)));
+        return nullptr;
+    }
+    if (!t->second) return nullptr;
+    ID2D1Bitmap *bmp = nullptr;
+    Thumb *th = t->second;
+    if (th->w > 0)
+        w->dc->CreateBitmap(D2D1::SizeU(th->w, th->h), th->px.data(), th->w * 4,
+                            D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), 96 * scale(w), 96 * scale(w)), &bmp);
+    w->thumb_bmps[it.target] = bmp; // also a failure: the icon stays
+    return bmp;
+}
+
 void draw_icon(Win *w, int index, float x, float y, float size) {
     ID2D1Bitmap *b = icon_bitmap(w, index);
     if (b) w->dc->DrawBitmap(b, D2D1::RectF(x, y, x + size, y + size), 1, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
@@ -260,7 +327,7 @@ void apply_filter(View &v) {
     int focus_item = v.focus >= 0 && v.focus < (int)v.shown.size() ? v.shown[v.focus] : -1;
     v.shown.clear();
     for (int i = 0; i < (int)v.all.size(); i++)
-        if (v.filter.empty() || StrStrIW(v.all[i].name.c_str(), v.filter.c_str())) v.shown.push_back(i);
+        if (v.filter.empty() || v.results || StrStrIW(v.all[i].name.c_str(), v.filter.c_str())) v.shown.push_back(i);
     v.focus = -1;
     for (int p = 0; p < (int)v.shown.size(); p++)
         if (v.shown[p] == focus_item) v.focus = p;
@@ -277,7 +344,16 @@ void watch(Win *w) {
 }
 
 void load(Win *w, View &v) {
-    if (v.gen) folder_forget(v.gen);
+    if (v.results && !v.filter.empty()) { // refreshing a search: asked again
+        SetTimer(w->hwnd, 8, 0, NULL);
+        return;
+    }
+    v.results = false;
+    v.search_id = 0;
+    if (v.gen) {
+        folder_forget(v.gen);
+        thumbs_cancel(v.gen);
+    }
     v.gen = ++g_gen;
     v.loading = true;
     folder_list(w->hwnd, v.gen, v.path);
@@ -302,6 +378,7 @@ void navigate(Win *w, const std::wstring &path, bool remember = true) {
     v.scroll = 0;
     v.error.clear();
     v.filter.clear();
+    v.results = false;
     sync_search(w);
     set_title(w);
     load(w, v);
@@ -590,11 +667,11 @@ void start_rename(Win *w) {
     const Item &it = v.all[v.shown[v.focus]];
     ensure_visible(w, v, v.focus);
     float s = scale(w);
-    D2D1_RECT_F l = list_rect(w);
-    float y = l.top + v.focus * kRowH - v.scroll, x0 = l.left + 8 + 26;
-    int x = (int)std::lround(x0 * s), top = (int)std::lround((y + 3) * s);
-    SetWindowPos(w->rename, HWND_TOP, x, top, (int)std::lround((x0 + name_width(w) - 30) * s) - x, (int)std::lround((y + kRowH - 3) * s) - top,
-                 SWP_SHOWWINDOW);
+    D2D1_RECT_F r = item_rect(w, v, v.focus);
+    D2D1_RECT_F box = is_grid(v) ? D2D1::RectF(r.left + 2, r.top + 6 + kThumb + 2, r.right - 2, r.top + 6 + kThumb + 26)
+                                 : D2D1::RectF(r.left + 4 + 26, r.top + 2, r.left + 4 + 26 + name_width(w) - 30, r.bottom - 2);
+    int x = (int)std::lround(box.left * s), top = (int)std::lround(box.top * s);
+    SetWindowPos(w->rename, HWND_TOP, x, top, (int)std::lround(box.right * s) - x, (int)std::lround(box.bottom * s) - top, SWP_SHOWWINDOW);
     w->rename_target = it.target;
     SetWindowTextW(w->rename, it.name.c_str());
     SetFocus(w->rename);
@@ -754,7 +831,7 @@ void draw_list(Win *w, D2D1_RECT_F c) {
         D2D1_RECT_F r = D2D1::RectF(xs[i] - 4, hy + 2, xs[i + 1] - 4, hy + kHeadH - 2);
         region(w, r, H_HEAD, i);
         if (hovered(w, H_HEAD, i)) fill_round(w, r, 4, kHover);
-        text(w, T(heads[i]), D2D1::RectF(r.left + 8, r.top, r.right - 18, r.bottom), w->f_small, kDim);
+        text(w, T(i == COL_TYPE && v.results ? L"Folder" : heads[i]), D2D1::RectF(r.left + 8, r.top, r.right - 18, r.bottom), w->f_small, kDim);
         if (v.sort == i) text(w, v.desc ? L"\xE70D" : L"\xE70E", D2D1::RectF(r.right - 18, r.top, r.right - 4, r.bottom), w->f_icon_s, kDim);
         if (i) fill(w, D2D1::RectF(xs[i] - 5, hy + 8, xs[i] - 4, hy + kHeadH - 8), kLine);
     }
@@ -766,11 +843,44 @@ void draw_list(Win *w, D2D1_RECT_F c) {
         std::wstring msg = v.loading ? T(L"Loading…") : !v.error.empty() ? v.error : !v.filter.empty() ? T(L"No items match your search.") : T(L"This folder is empty.");
         text(w, msg, D2D1::RectF(l.left, l.top + 20, l.right, l.top + 60), w->f_ui_c, !v.error.empty() ? kDanger : kDim);
     }
-    int first = (int)(v.scroll / kRowH), last = std::min((int)v.shown.size(), (int)((v.scroll + (l.bottom - l.top)) / kRowH) + 1);
+    int per = per_line(w, v);
+    int first = (int)(v.scroll / line_h(v)) * per, last = std::min((int)v.shown.size(), ((int)((v.scroll + (l.bottom - l.top)) / line_h(v)) + 1) * per);
+    if (is_grid(v)) {
+        prepare_thumbs(w, v);
+        for (int p = std::max(0, first); p < last; p++) {
+            const Item &it = v.all[v.shown[p]];
+            D2D1_RECT_F tile = item_rect(w, v, p);
+            bool sel = v.sel[v.shown[p]] != 0, hot = hovered(w, H_ROW, p);
+            if (sel) fill_round(w, tile, 5, kSelect, GetFocus() == w->hwnd ? 1 : 0.6f);
+            else if (hot) fill_round(w, tile, 5, kHover);
+            if (p == w->drop_row || (p == v.focus && GetFocus() == w->hwnd && !sel)) {
+                w->br->SetColor(p == w->drop_row ? color(kAccent) : color(kDim, 0.6f));
+                w->dc->DrawRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(tile.left + 0.5f, tile.top + 0.5f, tile.right - 0.5f, tile.bottom - 0.5f), 5, 5), w->br,
+                                            p == w->drop_row ? 2.f : 1.f);
+            }
+            float cx = (tile.left + tile.right) / 2, top = tile.top + 6;
+            if (ID2D1Bitmap *b = thumb_bitmap(w, v, it)) {
+                D2D1_SIZE_F sz = b->GetSize(); // DIPs, already fitted in kThumb
+                float bw = std::min(sz.width, kThumb), bh = std::min(sz.height, kThumb);
+                float x = cx - bw / 2, y = top + (kThumb - bh) / 2;
+                w->dc->DrawBitmap(b, D2D1::RectF(x, y, x + bw, y + bh), 1, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+            } else draw_icon(w, it.icon, cx - 16, top + kThumb / 2 - 16, 32);
+            // the name under it, two lines at most
+            D2D1_RECT_F nr = D2D1::RectF(tile.left + 4, top + kThumb + 2, tile.right - 4, tile.bottom - 2);
+            w->f_small->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+            w->f_small->SetWordWrapping(DWRITE_WORD_WRAPPING_EMERGENCY_BREAK);
+            w->f_small->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+            text(w, it.name, nr, w->f_small, kText, (it.attr & FILE_ATTRIBUTE_HIDDEN) ? 0.6f : 1);
+            w->f_small->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+            w->f_small->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+            w->f_small->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+        }
+        first = last; // no rows
+    }
     for (int p = std::max(0, first); p < last; p++) {
         const Item &it = v.all[v.shown[p]];
-        float y = l.top + p * kRowH - v.scroll;
-        D2D1_RECT_F row = D2D1::RectF(l.left + 4, y + 1, l.right - kScrollW - 2, y + kRowH - 1);
+        D2D1_RECT_F row = item_rect(w, v, p);
+        float y = row.top - 1;
         bool sel = v.sel[v.shown[p]] != 0, hot = hovered(w, H_ROW, p);
         if (sel) fill_round(w, row, 4, kSelect, GetFocus() == w->hwnd ? 1 : 0.6f);
         else if (hot) fill_round(w, row, 4, kHover);
@@ -810,7 +920,7 @@ void draw_list(Win *w, D2D1_RECT_F c) {
     }
 
     // scrollbar
-    float h = l.bottom - l.top, total = content_h(v);
+    float h = l.bottom - l.top, total = content_h(w, v);
     if (total > h) {
         float th = std::max(30.f, h * h / total), ty = l.top + (h - th) * (v.scroll / (total - h));
         D2D1_RECT_F track = D2D1::RectF(l.right - kScrollW, l.top, l.right, l.bottom);
@@ -830,12 +940,24 @@ void draw_status(Win *w, D2D1_RECT_F c) {
         size_t n = v.shown.size(), k = 0;
         for (int i : v.shown) k += v.sel[i] ? 1 : 0;
         left = n == 1 ? std::wstring(T(L"1 item")) : Tf(L"{0} items", { std::to_wstring(n) });
+        if (v.results) left = Tf(L"{0} found by Everything", { std::to_wstring(n) });
         if (k) left += L"   " + (k == 1 ? std::wstring(T(L"1 selected")) : Tf(L"{0} selected", { std::to_wstring(k) }));
-        if (!v.filter.empty()) left += L"   " + Tf(L"of {0}", { std::to_wstring(v.all.size()) });
+        if (!v.filter.empty() && !v.results) left += L"   " + Tf(L"of {0}", { std::to_wstring(v.all.size()) });
     } else {
         left = tasks_status(v.tasks);
     }
     text(w, left, D2D1::RectF(s.left + 12, s.top, s.right * 0.6f, s.bottom), w->f_small, kDim);
+    if (v.kind == TAB_FILES) {
+        const wchar_t *glyphs[2] = { L"\xE8FD", L"\xE8A9" }; // Details, Large icons
+        for (int i = 0; i < 2; i++) {
+            D2D1_RECT_F b = D2D1::RectF(s.right - 62 + i * 28, s.top + 2, s.right - 36 + i * 28, s.bottom - 2);
+            region(w, b, H_VIEW, i);
+            if ((i == 1) == v.grid) fill_round(w, b, 4, kTabOn);
+            else if (hovered(w, H_VIEW, i)) fill_round(w, b, 4, kHover);
+            text(w, glyphs[i], b, w->f_icon_s, (i == 1) == v.grid ? kAccent : kDim);
+        }
+        s.right -= 70;
+    }
     // the update: progress while it downloads, then «Restart to update»
     if (g_upd.state == UP_DOWNLOADING && g_upd.size > 0) {
         float frac = (float)g_upd.done / (float)g_upd.size, bw = 140;
@@ -876,6 +998,8 @@ bool make_target(Win *w) {
 void drop_target(Win *w) {
     for (auto &kv : w->icons) release(kv.second);
     w->icons.clear();
+    for (auto &kv : w->thumb_bmps) release(kv.second);
+    w->thumb_bmps.clear();
     release(w->br);
     release(w->rt);
     w->dc = nullptr;
@@ -931,11 +1055,19 @@ const Region *hit(Win *w, float x, float y) {
     return nullptr;
 }
 
-int row_at(Win *w, float y) {
+int row_at(Win *w, float x, float y) {
     View &v = cur_view(w);
     D2D1_RECT_F l = list_rect(w);
-    int p = (int)((y - l.top + v.scroll) / kRowH);
-    return p >= 0 && p < (int)v.shown.size() ? p : -1;
+    int per = per_line(w, v), line = (int)std::floor((y - l.top + v.scroll) / line_h(v));
+    int col = is_grid(v) ? (int)std::floor((x - l.left - 6) / kTileW) : 0;
+    if (line < 0 || col < 0 || col >= per) return -1;
+    int p = line * per + col;
+    if (p >= (int)v.shown.size()) return -1;
+    if (is_grid(v)) {
+        D2D1_RECT_F r = item_rect(w, v, p);
+        if (!inside(r, x, y)) return -1; // the gap between tiles is background
+    }
+    return p;
 }
 
 void on_move(Win *w, float x, float y) {
@@ -953,7 +1085,7 @@ void on_move(Win *w, float x, float y) {
     if (w->drag_scroll) {
         View &v = cur_view(w);
         D2D1_RECT_F l = list_rect(w);
-        float h = l.bottom - l.top, total = content_h(v), th = std::max(30.f, h * h / total);
+        float h = l.bottom - l.top, total = content_h(w, v), th = std::max(30.f, h * h / total);
         v.scroll = (y - w->drag_dy - l.top) / (h - th) * (total - h);
         clamp_scroll(w, v);
         redraw(w);
@@ -963,7 +1095,7 @@ void on_move(Win *w, float x, float y) {
     int id = r ? r->id : H_NONE, arg = r ? r->arg : -1;
     if (id == H_LIST) {
         if (cur_view(w).kind == TAB_FILES) {
-            int p = row_at(w, y);
+            int p = row_at(w, x, y);
             if (p >= 0) id = H_ROW, arg = p;
         } else {
             arg = tasks_row_at(cur_view(w).tasks, x, y);
@@ -990,9 +1122,9 @@ void on_down(Win *w, float x, float y, bool dbl, bool right) {
     switch (r->id) {
     case H_SCROLL: {
         D2D1_RECT_F l = list_rect(w);
-        float h = l.bottom - l.top, total = content_h(v), th = std::max(30.f, h * h / total), ty = l.top + (h - th) * (v.scroll / (total - h));
+        float h = l.bottom - l.top, total = content_h(w, v), th = std::max(30.f, h * h / total), ty = l.top + (h - th) * (v.scroll / (total - h));
         if (y < ty || y > ty + th) { // a page up or down, as a scrollbar does
-            v.scroll += (y < ty ? -1 : 1) * (h - kRowH);
+            v.scroll += (y < ty ? -1 : 1) * (h - line_h(v));
             clamp_scroll(w, v);
         } else {
             w->drag_scroll = true;
@@ -1007,7 +1139,7 @@ void on_down(Win *w, float x, float y, bool dbl, bool right) {
             tasks_click(v.tasks, w->hwnd, x, y, dbl, right);
             break;
         }
-        int p = row_at(w, y);
+        int p = row_at(w, x, y);
         if (p < 0) {
             if (!ctrl) select_only(v, -1);
             break;
@@ -1033,10 +1165,12 @@ void on_down(Win *w, float x, float y, bool dbl, bool right) {
     redraw(w);
 }
 
+void set_grid(Win *w, bool on);
+
 void on_up(Win *w, float x, float y, bool middle) {
     if (!middle) {
         w->drag_maybe = false;
-        if (w->collapse_to >= 0 && cur_view(w).kind == TAB_FILES && row_at(w, y) == w->collapse_to) select_only(cur_view(w), w->collapse_to);
+        if (w->collapse_to >= 0 && cur_view(w).kind == TAB_FILES && row_at(w, x, y) == w->collapse_to) select_only(cur_view(w), w->collapse_to);
         w->collapse_to = -1;
     }
     if (w->drag_scroll) {
@@ -1053,7 +1187,7 @@ void on_up(Win *w, float x, float y, bool middle) {
             size_t n = w->places.size();
             new_tab(w, r->arg < (int)n ? w->places[r->arg].path : w->drives[r->arg - n].path);
         } else if (r->id == H_LIST && cur_view(w).kind == TAB_FILES) {
-            int p = row_at(w, y);
+            int p = row_at(w, x, y);
             if (p >= 0) open_item(w, cur_view(w).all[cur_view(w).shown[p]], true);
         }
         return redraw(w);
@@ -1108,8 +1242,18 @@ void on_up(Win *w, float x, float y, bool middle) {
         break;
     }
     case H_HEAD: set_sort(w, r->arg); break;
+    case H_VIEW: set_grid(w, r->arg == 1); break;
     case H_UPDATE: app_install_update(); return;
     }
+    redraw(w);
+}
+
+void set_grid(Win *w, bool on) {
+    View &v = cur_view(w);
+    if (v.kind != TAB_FILES || v.grid == on) return;
+    v.grid = on;
+    clamp_scroll(w, v);
+    ensure_visible(w, v, v.focus);
     redraw(w);
 }
 
@@ -1128,10 +1272,11 @@ bool on_key(Win *w, WPARAM key) {
     View &v = cur_view(w);
     bool ctrl = GetKeyState(VK_CONTROL) < 0, shift = GetKeyState(VK_SHIFT) < 0, alt = GetKeyState(VK_MENU) < 0;
     D2D1_RECT_F l = list_rect(w);
-    int page = std::max(1, (int)((l.bottom - l.top) / kRowH) - 1);
+    int per = per_line(w, v), page = std::max(1, (int)((l.bottom - l.top) / line_h(v)) - 1) * per;
     if (ctrl && key == 'T') return new_tab(w, v.kind == TAB_FILES ? v.path : L""), true;
     if (ctrl && key == 'W') return close_tab(w, w->cur), true;
     if (ctrl && shift && key == 'N' && v.kind == TAB_FILES) return new_folder(w), true;
+    if (ctrl && shift && (key == '2' || key == '6')) return set_grid(w, key == '2'), true; // Windows' keys: Large icons, Details
     if (ctrl && key == 'N') {
         WindowSpec s;
         s.path = v.path;
@@ -1174,8 +1319,16 @@ bool on_key(Win *w, WPARAM key) {
         return true;
     }
     switch (key) {
-    case VK_DOWN: move_focus(w, v.focus + 1, shift, ctrl); return true;
-    case VK_UP: move_focus(w, v.focus < 0 ? 0 : v.focus - 1, shift, ctrl); return true;
+    case VK_DOWN: move_focus(w, v.focus < 0 ? 0 : v.focus + per, shift, ctrl); return true;
+    case VK_UP: move_focus(w, v.focus < 0 ? 0 : v.focus - per, shift, ctrl); return true;
+    case VK_RIGHT:
+        if (!is_grid(v)) return false;
+        move_focus(w, v.focus + 1, shift, ctrl);
+        return true;
+    case VK_LEFT:
+        if (!is_grid(v)) return false;
+        move_focus(w, v.focus < 0 ? 0 : v.focus - 1, shift, ctrl);
+        return true;
     case VK_NEXT: move_focus(w, v.focus + page, shift, ctrl); return true;
     case VK_PRIOR: move_focus(w, v.focus - page, shift, ctrl); return true;
     case VK_HOME: move_focus(w, 0, shift, ctrl); return true;
@@ -1236,14 +1389,14 @@ bool context_menu(Win *w, LPARAM lp) {
     std::vector<std::wstring> items;
     if (lp == -1) {
         items = selected_targets(v);
-        float y = v.focus >= 0 ? l.top + (v.focus + 1) * kRowH - v.scroll : l.top + 10;
-        pt = { (LONG)((l.left + 40) * s), (LONG)(y * s) };
+        D2D1_RECT_F r = v.focus >= 0 ? item_rect(w, v, v.focus) : D2D1::RectF(l.left, l.top, l.left + 30, l.top + 10);
+        pt = { (LONG)((r.left + 30) * s), (LONG)(r.bottom * s) };
         ClientToScreen(w->hwnd, &pt);
     } else {
         POINT c = pt;
         ScreenToClient(w->hwnd, &c);
         if (!inside(l, c.x / s, c.y / s)) return false;
-        if (row_at(w, c.y / s) >= 0) items = selected_targets(v);
+        if (row_at(w, c.x / s, c.y / s) >= 0) items = selected_targets(v);
     }
     if (shell_menu(w->hwnd, v.path, items, pt) == "rename") start_rename(w);
     return true;
@@ -1265,7 +1418,7 @@ struct WinDrop final : DropHandler {
             return i < n ? w->places[i].path : i - n < w->drives.size() ? w->drives[i - n].path : L"";
         }
         if (inside(list_rect(w), x, y)) {
-            int p = row_at(w, y);
+            int p = row_at(w, x, y);
             if (p >= 0 && v.all[v.shown[p]].dir) return v.all[v.shown[p]].target;
         }
         return v.path;
@@ -1277,7 +1430,7 @@ struct WinDrop final : DropHandler {
             POINT c = screen;
             ScreenToClient(w->hwnd, &c);
             float x = c.x / scale(w), y = c.y / scale(w);
-            int p = inside(list_rect(w), x, y) ? row_at(w, y) : -1;
+            int p = inside(list_rect(w), x, y) ? row_at(w, x, y) : -1;
             if (p >= 0 && v.all[v.shown[p]].dir) row = p;
         }
         if (row != w->drop_row) {
@@ -1335,6 +1488,7 @@ LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         SetWindowSubclass(w->rename, edit_proc, 3, (DWORD_PTR)w);
         edit_fonts(w);
         w->drop = new WinDrop(w);
+        ChangeWindowMessageFilterEx(h, WM_COPYDATA, MSGFLT_ALLOW, NULL); // Everything may run elevated
         shell_register_drop(h, w->drop);
         w->places = folder_places();
         w->drives = folder_drives();
@@ -1355,8 +1509,9 @@ LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             View &v = cur_view(w);
             if (v.kind == TAB_FILES && t != v.filter) {
                 v.filter = t;
-                apply_filter(v);
+                if (!v.results) apply_filter(v); // the folder filtered at once; Everything's results a moment later
                 v.scroll = 0;
+                SetTimer(h, 8, 250, NULL);
                 redraw(w);
             }
         }
@@ -1415,6 +1570,7 @@ LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         if (IsWindowVisible(w->rename)) SetFocus(h);
         View &v = cur_view(w);
         if (v.kind == TAB_TASKS) tasks_wheel(v.tasks, GET_WHEEL_DELTA_WPARAM(wp));
+        else if (GetKeyState(VK_CONTROL) < 0) set_grid(w, GET_WHEEL_DELTA_WPARAM(wp) > 0);
         else {
             v.scroll -= GET_WHEEL_DELTA_WPARAM(wp) / 120.f * kRowH * 3;
             clamp_scroll(w, v);
@@ -1437,6 +1593,26 @@ LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         break;
     case WM_DEVICECHANGE: w->drives = folder_drives(); redraw(w); return TRUE;
     case WM_APP_LIST: on_listing(w, (Listing *)lp); return 0;
+    case WM_COPYDATA: { // Everything's answer to a search
+        auto *cds = (COPYDATASTRUCT *)lp;
+        for (View &v : w->views) {
+            if (!v.search_id || v.search_id != cds->dwData || v.filter.empty()) continue;
+            v.all.clear();
+            folder_search_items(cds, v.all);
+            folder_sort(v.all, v.sort, v.desc);
+            v.results = true;
+            v.loading = false;
+            v.error.clear();
+            v.sel.assign(v.all.size(), 0);
+            v.focus = v.anchor = -1;
+            v.scroll = 0;
+            apply_filter(v);
+            log_line("everything: " + std::to_string(v.all.size()) + " results");
+            redraw(w);
+            return TRUE;
+        }
+        return FALSE;
+    }
     case WM_APP_CHANGED: {
         PIDLIST_ABSOLUTE *pidls = nullptr;
         LONG ev = 0;
@@ -1445,11 +1621,21 @@ LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_TIMER:
+        if (wp == 8) { // the search typed: everything under the folder, through Everything
+            KillTimer(h, 8);
+            View &v = cur_view(w);
+            if (v.kind != TAB_FILES) return 0;
+            static DWORD ids;
+            if (v.filter.empty()) {
+                if (v.results) load(w, v); // back to the folder
+            } else if (!folder_search(h, v.search_id = ++ids, v.path, v.filter)) v.search_id = 0;
+            return 0;
+        }
         if (wp == 7) {
             View &v = cur_view(w);
             if (IsWindowVisible(w->rename)) return 0; // after the rename
             KillTimer(h, 7);
-            if (v.kind == TAB_FILES && !v.path.empty()) load(w, v);
+            if (v.kind == TAB_FILES && !v.path.empty() && !v.results) load(w, v);
             return 0;
         }
         break;
@@ -1466,6 +1652,15 @@ LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         }
         delete ic;
         redraw(w);
+        return 0;
+    }
+    case WM_APP_THUMB: {
+        auto *t = (Thumb *)lp;
+        auto it = w->thumbs.find(t->target);
+        if (t->gen == w->thumbs_gen && it != w->thumbs.end() && !it->second) {
+            it->second = t;
+            redraw(w);
+        } else delete t;
         return 0;
     }
     case WM_APP_TASKS:
@@ -1486,6 +1681,8 @@ LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             if (v.gen) folder_forget(v.gen);
         }
         w->views.clear();
+        thumbs_cancel(w->thumbs_gen);
+        forget_thumbs(w);
         delete static_cast<WinDrop *>(w->drop);
         drop_target(w);
         release(w->f_ui), release(w->f_ui_c), release(w->f_small), release(w->f_icon), release(w->f_icon_s), release(w->f_title);
@@ -1602,6 +1799,18 @@ void window_focus_last() {
     SetForegroundWindow(best->hwnd);
 }
 
+bool window_focus_tasks() {
+    for (Win *w : g_wins)
+        for (int i = 0; i < (int)w->views.size(); i++)
+            if (w->views[i].kind == TAB_TASKS) {
+                switch_tab(w, i);
+                if (IsIconic(w->hwnd)) ShowWindow(w->hwnd, SW_RESTORE);
+                SetForegroundWindow(w->hwnd);
+                return true;
+            }
+    return false;
+}
+
 std::vector<WindowSpec> window_specs() {
     std::vector<WindowSpec> out;
     for (Win *w : g_wins) {
@@ -1645,6 +1854,8 @@ bool window_shot(const std::wstring &png) {
         // the icons belong to the window's target: a set of their own for this one
         std::unordered_map<int, ID2D1Bitmap *> icons;
         icons.swap(w->icons);
+        std::unordered_map<std::wstring, ID2D1Bitmap *> thumb_bmps;
+        thumb_bmps.swap(w->thumb_bmps);
         ID2D1RenderTarget *dc = w->dc;
         ID2D1SolidColorBrush *wbr = w->br;
         w->dc = rt;
@@ -1655,6 +1866,8 @@ bool window_shot(const std::wstring &png) {
         g_shot = false;
         for (auto &kv : w->icons) release(kv.second);
         w->icons.swap(icons);
+        for (auto &kv : w->thumb_bmps) release(kv.second);
+        w->thumb_bmps.swap(thumb_bmps);
         w->dc = dc;
         w->br = wbr;
     }
@@ -1691,6 +1904,7 @@ void window_command(const std::wstring &verb, const std::wstring &arg) {
             if (!_wcsicmp(v.all[v.shown[p]].name.c_str(), arg.c_str())) move_focus(w, p, false, false);
     } else if (verb == L"newtab") new_tab(w, folder_normalize(arg));
     else if (verb == L"newfolder") new_folder(w);
+    else if (verb == L"view") set_grid(w, arg == L"icons");
     else if (verb == L"rename") { // the focused item renamed to arg, as typed in the box
         start_rename(w);
         if (IsWindowVisible(w->rename)) {

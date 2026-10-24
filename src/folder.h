@@ -38,6 +38,12 @@ struct Icons {
 };
 void folder_sort(std::vector<Item> &items, int col, bool desc);
 
+// Search through Everything (voidtools) if it is running: what matches `text` under `path` (everywhere if ""),
+// answered later with WM_COPYDATA to wnd (dwData = id). False if Everything is not there.
+bool folder_search(HWND wnd, DWORD id, const std::wstring &path, const std::wstring &text);
+// Everything's answer as items (their type column says the folder they are in)
+void folder_search_items(const COPYDATASTRUCT *cds, std::vector<Item> &items);
+
 std::wstring folder_title(const std::wstring &path);   // "Home", "Downloads", "C:", the last part of the path
 std::wstring folder_parent(const std::wstring &path);  // "" (Home) above a drive
 std::wstring folder_join(const std::wstring &dir, const std::wstring &name);

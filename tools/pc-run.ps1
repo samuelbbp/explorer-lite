@@ -14,6 +14,7 @@
 #   stop               ends the resident (and what it started)
 #   make <dir>         a folder with file1.txt..file3.txt (a sandbox for file operations)
 #   exists <path> / missing <path>   checks, failures go to errors
+#   probe <args>       runs explorer-lite.exe --instance test <args> on the user's desktop (no window: --everything)
 # {dir} in a step is this test's folder.
 param([string]$Dir = $PSScriptRoot, [string]$Steps = "$PSScriptRoot\steps.txt")
 $ErrorActionPreference = 'Stop'
@@ -95,6 +96,10 @@ try {
                 Send '--quit'
                 Start-Sleep -Milliseconds 500
                 foreach ($p in Mine) { & taskkill.exe /PID $p.ProcessId /T /F 2>&1 | Out-Null }
+            }
+            'probe' {
+                $p = Start-Process -FilePath $exe -ArgumentList "--instance test $rest" -PassThru -Wait -WindowStyle Hidden
+                if ($p.ExitCode -ne 0) { $results.errors += "probe $rest`: exit $($p.ExitCode)" }
             }
             'make' {
                 New-Item -ItemType Directory -Force $rest | Out-Null

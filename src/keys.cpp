@@ -1,0 +1,123 @@
+// keys.cpp: see keys.h.
+#include "keys.h"
+#include <shlobj.h>
+#include <string>
+#include "conf.h"
+#include "idioma.h"
+
+namespace {
+
+HWND g_host;
+UINT g_msg;
+DWORD g_thread_id;
+HANDLE g_thread;
+DWORD g_swallow_up; // the key whose press was taken: its release is taken too
+
+bool down(int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; }
+
+// A key nobody uses, pressed and released: Windows does not open Start when Win is let go after another key, and
+// the process that sent the last input may bring its window to the front.
+void dummy_key() {
+    INPUT in[2] = {};
+    in[0].type = in[1].type = INPUT_KEYBOARD;
+    in[0].ki.wVk = in[1].ki.wVk = 0xE8; // unassigned
+    in[1].ki.dwFlags = KEYEVENTF_KEYUP;
+    SendInput(2, in, sizeof(INPUT));
+}
+
+LRESULT CALLBACK hook(int code, WPARAM wp, LPARAM lp) {
+    if (code == HC_ACTION) {
+        auto *k = (KBDLLHOOKSTRUCT *)lp;
+        bool press = wp == WM_KEYDOWN || wp == WM_SYSKEYDOWN, release = wp == WM_KEYUP || wp == WM_SYSKEYUP;
+        if (!(k->flags & LLKHF_INJECTED)) {
+            if (release && k->vkCode == g_swallow_up) {
+                g_swallow_up = 0;
+                return 1;
+            }
+            if (press) {
+                bool win = down(VK_LWIN) || down(VK_RWIN), ctrl = down(VK_CONTROL), shift = down(VK_SHIFT), alt = down(VK_MENU);
+                int what = 0;
+                if (k->vkCode == 'E' && win && !ctrl && !shift && !alt) what = KEY_EXPLORER;
+                else if (k->vkCode == VK_ESCAPE && ctrl && shift && !win && !alt) what = KEY_TASKS;
+                if (what) {
+                    g_swallow_up = k->vkCode;
+                    dummy_key();
+                    PostMessageW(g_host, g_msg, what, 0);
+                    return 1;
+                }
+            }
+        }
+    }
+    return CallNextHookEx(NULL, code, wp, lp);
+}
+
+// the hook lives on its own thread: Windows waits for it on every key, so it never queues behind a window's paint
+DWORD WINAPI hook_thread(void *) {
+    HHOOK h = SetWindowsHookExW(WH_KEYBOARD_LL, hook, GetModuleHandleW(NULL), 0);
+    MSG m;
+    while (GetMessageW(&m, NULL, 0, 0) > 0) DispatchMessageW(&m);
+    if (h) UnhookWindowsHookEx(h);
+    return 0;
+}
+
+const wchar_t *kVerb = L"explorer-lite";
+const wchar_t *kTypes[] = { L"Software\\Classes\\Directory\\shell", L"Software\\Classes\\Drive\\shell" };
+
+std::wstring reg_default(const wchar_t *key) {
+    wchar_t v[256] = L"";
+    DWORD size = sizeof(v);
+    if (RegGetValueW(HKEY_CURRENT_USER, key, NULL, RRF_RT_REG_SZ, NULL, v, &size) != ERROR_SUCCESS) return L"";
+    return v;
+}
+
+bool reg_set(const std::wstring &key, const wchar_t *name, const std::wstring &value) {
+    return RegSetKeyValueW(HKEY_CURRENT_USER, key.c_str(), name, REG_SZ, value.c_str(), (DWORD)((value.size() + 1) * sizeof(wchar_t))) == ERROR_SUCCESS;
+}
+
+} // namespace
+
+void keys_start(HWND host, UINT msg) {
+    g_host = host;
+    g_msg = msg;
+    if (g_thread || !keys_on()) return;
+    g_thread = CreateThread(NULL, 0, hook_thread, NULL, 0, &g_thread_id);
+}
+
+void keys_stop() {
+    if (!g_thread) return;
+    PostThreadMessageW(g_thread_id, WM_QUIT, 0, 0);
+    WaitForSingleObject(g_thread, 2000);
+    CloseHandle(g_thread);
+    g_thread = NULL;
+}
+
+bool keys_on() {
+    std::string v = conf_get("shortcuts");
+    return v.empty() ? instance().empty() : v == "1";
+}
+
+void keys_set(bool on) {
+    conf_set("shortcuts", on ? "1" : "0");
+    if (on) keys_start(g_host, g_msg);
+    else keys_stop();
+}
+
+bool folders_on() { return reg_default(kTypes[0]) == kVerb; }
+
+void folders_set(bool on) {
+    for (const wchar_t *type : kTypes) {
+        std::wstring verb = std::wstring(type) + L"\\" + kVerb;
+        if (on) {
+            std::wstring cmd = L"\"" + exe_path() + L"\" \"%1\"";
+            if (!instance().empty()) cmd += L" --instance " + instance();
+            reg_set(verb, L"MUIVerb", T(L"Open in explorer-lite"));
+            reg_set(verb, L"Icon", L"\"" + exe_path() + L"\",0");
+            reg_set(verb + L"\\command", NULL, cmd);
+            reg_set(type, NULL, kVerb); // the default verb: double-clicking a folder anywhere
+        } else {
+            if (reg_default(type) == kVerb) RegDeleteKeyValueW(HKEY_CURRENT_USER, type, NULL);
+            RegDeleteTreeW(HKEY_CURRENT_USER, verb.c_str());
+        }
+    }
+    SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, NULL, NULL);
+}

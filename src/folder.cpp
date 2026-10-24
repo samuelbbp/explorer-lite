@@ -190,7 +190,94 @@ DWORD WINAPI list_thread(void *p) {
     return 0;
 }
 
+// --- Everything's IPC (everything_ipc.h of its SDK: no DLL needed) ---------------------------------------------
+
+const DWORD kQuery2W = 18;                                          // EVERYTHING_IPC_COPYDATA_QUERY2W
+const DWORD kReqName = 0x1, kReqPath = 0x2, kReqSize = 0x10, kReqModified = 0x40; // EVERYTHING_IPC_QUERY2_REQUEST_*
+const DWORD kSortName = 1, kFolder = 0x1, kMaxResults = 5000;
+
+struct Query2 {
+    DWORD reply_hwnd, reply_copydata_message, search_flags, offset, max_results, request_flags, sort_type;
+};
+
+// its window, on this desktop (Everything only answers windows on its own)
+HWND everything() { return FindWindowW(L"EVERYTHING_TASKBAR_NOTIFICATION", NULL); }
+
 } // namespace
+
+bool folder_search(HWND wnd, DWORD id, const std::wstring &path, const std::wstring &text) {
+    HWND ev = everything();
+    if (!ev) {
+        log_line("everything: not running");
+        return false;
+    }
+    // under a folder: its path as a term (Everything matches terms with a backslash against the full path)
+    std::wstring q = path.empty() ? text : L"\"" + folder_join(path, L"") + L"\" " + text;
+    std::vector<BYTE> buf(sizeof(Query2) + (q.size() + 1) * sizeof(wchar_t));
+    auto *qs = (Query2 *)buf.data();
+    qs->reply_hwnd = (DWORD)(DWORD_PTR)wnd;
+    qs->reply_copydata_message = id;
+    qs->max_results = kMaxResults;
+    qs->request_flags = kReqName | kReqPath | kReqSize | kReqModified;
+    qs->sort_type = kSortName;
+    memcpy(qs + 1, q.c_str(), (q.size() + 1) * sizeof(wchar_t));
+    COPYDATASTRUCT cds = { kQuery2W, (DWORD)buf.size(), buf.data() };
+    DWORD_PTR res = 0;
+    bool ok = SendMessageTimeoutW(ev, WM_COPYDATA, (WPARAM)wnd, (LPARAM)&cds, SMTO_ABORTIFHUNG, 2000, &res) && res;
+    if (!ok) log_line("everything: the query was not taken (" + std::to_string(GetLastError()) + ")");
+    return ok;
+}
+
+void folder_search_items(const COPYDATASTRUCT *cds, std::vector<Item> &items) {
+    // EVERYTHING_IPC_LIST2: totitems, numitems, offset, request_flags, sort_type, then {flags, data_offset} per item
+    const BYTE *base = (const BYTE *)cds->lpData, *end = base + cds->cbData;
+    if (cds->cbData < 20) return;
+    const DWORD *head = (const DWORD *)base;
+    DWORD n = head[1], req = head[3];
+    const DWORD *entries = head + 5;
+    if ((const BYTE *)(entries + 2 * (size_t)n) > end) return;
+    items.reserve(n);
+    for (DWORD i = 0; i < n; i++) {
+        const BYTE *p = base + entries[2 * i + 1];
+        Item it;
+        it.dir = (entries[2 * i] & kFolder) != 0;
+        std::wstring name, dir;
+        // the fields come in the order of their request bits; text is a length then the characters and a null
+        auto text = [&](std::wstring &out) {
+            if (p + 4 > end) return false;
+            DWORD len = *(const DWORD *)p;
+            p += 4;
+            if (p + (len + 1) * sizeof(wchar_t) > end) return false;
+            out.assign((const wchar_t *)p, len);
+            p += (len + 1) * sizeof(wchar_t);
+            return true;
+        };
+        if ((req & kReqName) && !text(name)) break;
+        if ((req & kReqPath) && !text(dir)) break;
+        if (req & kReqSize) {
+            if (p + 8 > end) break;
+            it.bytes = *(const uint64_t *)p;
+            p += 8;
+        }
+        if (req & kReqModified) {
+            if (p + 8 > end) break;
+            memcpy(&it.mtime, p, 8);
+            p += 8;
+        }
+        it.name = name;
+        it.target = folder_join(dir, name);
+        it.attr = it.dir ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL;
+        it.icon = type_of(name, it.dir).icon;
+        it.type = dir;
+        it.date = format_date(it.mtime);
+        if (!it.dir) {
+            wchar_t kb[64] = L"";
+            StrFormatKBSizeW((LONGLONG)it.bytes, kb, 64);
+            it.size = kb;
+        }
+        items.push_back(std::move(it));
+    }
+}
 
 void folder_forget(uint64_t gen) {
     AcquireSRWLockExclusive(&g_alive_lock);

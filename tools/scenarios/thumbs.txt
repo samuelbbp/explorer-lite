@@ -1,0 +1,22 @@
+# Large icons: thumbnails made by Windows' handlers (pictures) and big icons (folders, programs).
+conf language=en
+start --tray
+sleep 2000
+send
+sleep 2000
+cmd size 1180x720
+cmd go C:\Windows\Web\Screen
+sleep 1000
+cmd view icons
+sleep 3000
+shot thumbs-pictures
+mem thumbs-pictures
+cmd go C:\Windows
+sleep 1500
+shot thumbs-windows
+cmd view details
+sleep 800
+shot thumbs-back-to-details
+cmd closeall
+sleep 1000
+stop
