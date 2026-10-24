@@ -19,7 +19,7 @@ cmd tasks
 sleep 5000
 shot tasks
 mem window-tasks
-cmd taskpage 1
+cmd taskpage 3
 sleep 1500
 shot services
 cmd taskpage 2
