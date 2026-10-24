@@ -1,0 +1,25 @@
+# Memory and speed: the resident, a window with a big folder twice (cold and warm), closed, opened again.
+start --tray
+sleep 2500
+mem resident
+send
+sleep 2000
+mem window-home
+cmd go C:\Windows\System32
+sleep 3000
+shot system32
+mem window-system32
+cmd go C:\Windows
+sleep 1000
+cmd go C:\Windows\System32
+sleep 2000
+cmd closeall
+sleep 3000
+mem resident-after-1
+send C:\Windows
+sleep 2000
+mem window-again
+cmd closeall
+sleep 3000
+mem resident-after-2
+stop

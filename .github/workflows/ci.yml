@@ -1,0 +1,78 @@
+# CI of explorer-lite: every pull request to main (and Run workflow) checks the translations, builds and packages it
+# like release.yml, stamped with the version main would publish (.github/release.sh plan ci), and publishes nothing.
+# No test suites (scenarios run by hand on Windows: tools/pc-test.sh). One trigger per job: release.yml runs on the
+# push to main and Run workflow only.
+name: ci
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# one run per PR: a new push replaces the run in progress
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  ZIG_VERSION: 0.16.0
+  RELEASES_REPO: justdiegocom/explorer-lite-releases
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # tags and history: version and notes
+          persist-credentials: false
+
+      - name: Version and notes
+        id: plan
+        run: |
+          .github/release.sh plan ci "$RUNNER_TEMP/notes.md" | tee "$RUNNER_TEMP/plan.txt"
+          { echo "### ci"; echo '```'; cat "$RUNNER_TEMP/plan.txt"; echo '```'; cat "$RUNNER_TEMP/notes.md"; } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: just, makensis and zip
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends just nsis zip >/dev/null
+          echo "$(just --version), makensis $(makensis -VERSION), zig $(zig version)"
+
+      # the strings in the code are all listed (i18n/fuente.json) and every language has them all
+      - name: Translations (comprobar.py)
+        run: |
+          codes=()
+          for f in i18n/*.json; do
+            case ${f##*/} in fuente.json|lista.json) continue ;; esac
+            codes+=("$(basename "$f" .json)")
+          done
+          echo "checking: ${codes[*]}"
+          python3 i18n/comprobar.py "${codes[@]}"
+
+      - name: Build (just build, stamped with the version)
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+        run: just build "$VERSION"
+
+      - name: Package (package.sh)
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+        run: |
+          ./package.sh "$VERSION"
+          cd dist
+          for f in "explorer-lite-Setup-$VERSION.exe" "explorer-lite-$VERSION-windows-x64.zip"; do
+            test -s "$f"
+            grep -qE "^[0-9a-f]{64}  ${f//./\\.}\$" "$f.sha256"
+            sha256sum -c "$f.sha256"
+          done
+          { echo '### Assets'; echo '```'; ls -l explorer-lite-*; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
