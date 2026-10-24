@@ -4,6 +4,9 @@ conf language=en
 start --tray
 sleep 2000
 mem resident
+# the first update check (30 s after start) loads winhttp and TLS for good: done before, so the last mem is the tab's
+sleep 35000
+mem resident-after-update-check
 send
 sleep 2000
 cmd size 1280x800

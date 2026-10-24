@@ -1343,12 +1343,13 @@ void tasks_destroy(TasksView *t) {
     Sampler *s = t->sampler;
     InterlockedExchange(&s->stop, 1);
     SetEvent(s->wake);
-    if (s->thread) {
-        WaitForSingleObject(s->thread, 5000);
-        CloseHandle(s->thread);
+    // a sample still running after 5 s (the first opens the counters, slow on a busy machine): the thread keeps its
+    // Sampler, left behind rather than freed under it
+    if (!s->thread || WaitForSingleObject(s->thread, 5000) == WAIT_OBJECT_0) {
+        if (s->thread) CloseHandle(s->thread);
+        CloseHandle(s->wake);
+        delete s;
     }
-    CloseHandle(s->wake);
-    delete s;
     for (IDWriteTextFormat *f : { t->f_total, t->f_title, t->f_model, t->f_stat, t->f_item })
         if (f) f->Release();
     if (t->dash) t->dash->Release();
