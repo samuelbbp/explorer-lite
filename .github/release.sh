@@ -14,7 +14,7 @@
 # only prints.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-RELEASES_REPO=${RELEASES_REPO:-justdiegocom/explorer-lite-releases}
+RELEASES_REPO=${RELEASES_REPO:-justdiegocom/explorer-lite}
 RELEASES_GIT=${RELEASES_GIT:-https://github.com/$RELEASES_REPO.git} # another git URL or path: local dry runs
 die() { echo "release.sh: $*" >&2; exit 1; }
 semsort() { sort -t. -k1,1n -k2,2n -k3,3n; }

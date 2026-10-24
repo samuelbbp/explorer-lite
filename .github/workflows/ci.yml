@@ -19,7 +19,7 @@ concurrency:
 
 env:
   ZIG_VERSION: 0.16.0
-  RELEASES_REPO: justdiegocom/explorer-lite-releases
+  RELEASES_REPO: justdiegocom/explorer-lite
 
 jobs:
   build:

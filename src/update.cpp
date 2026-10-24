@@ -16,7 +16,7 @@ namespace {
 const wchar_t kApiHost[] = L"api.github.com";
 // releases/latest never returns a prerelease: the app only follows the stable channel (prereleases are
 // developer builds, installed by hand)
-const wchar_t kApiPath[] = L"/repos/justdiegocom/explorer-lite-releases/releases/latest";
+const wchar_t kApiPath[] = L"/repos/justdiegocom/explorer-lite/releases/latest";
 
 HWND g_wnd;
 UINT g_msg;

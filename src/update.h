@@ -1,5 +1,5 @@
 // update.h: look for and install new versions (copied from wa-lite). The latest published version is checked in
-// the public repo justdiegocom/explorer-lite-releases (WinHTTP, no curl or telemetry: just that
+// the public repo justdiegocom/explorer-lite (WinHTTP, no curl or telemetry: just that
 // request), 30 s after startup and then every 4 hours, or by hand from the tray menu. If
 // there is a new one it is downloaded (only from github.com / *.githubusercontent.com over HTTPS), its SHA256 is
 // checked against the release's .sha256 (if it does not match or is missing, it is not installed) and launched

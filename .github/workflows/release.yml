@@ -1,12 +1,12 @@
 # Releases of explorer-lite. Everything on ubuntu-latest: zig c++ cross-compiles it (just build), makensis and zip
 # package it (package.sh).
-#   push to main            -> release vX.Y.Z in justdiegocom/explorer-lite-releases, the latest one (the app updates to
-#                              it), plus the source tag vX.Y.Z here; "[skip release]" in the head commit skips it
+#   push to main            -> release vX.Y.Z here (the repo is public), the latest one (the app updates to it);
+#                              "[skip release]" in the head commit skips it
 #   Run workflow on a branch with prerelease -> prerelease vX.Y.Z-<branch>.N, never the latest (the app only reads
 #                              releases/latest); same assets
 #   one trigger per job: a pull request's CI is ci.yml; a release removes the prereleases of branches already merged
-# Version and notes: .github/release.sh. Actions are pinned to a commit SHA (tag in a comment). RELEASE_TOKEN
-# (contents write on explorer-lite-releases) only reaches the publish job, which runs no third-party action.
+# Version and notes: .github/release.sh. Actions are pinned to a commit SHA (tag in a comment). Only the publish job
+# can write (contents: write, the workflow's own token), and it runs no third-party action that sees it.
 name: release
 
 on:
@@ -30,7 +30,7 @@ concurrency:
 
 env:
   ZIG_VERSION: 0.16.0
-  RELEASES_REPO: justdiegocom/explorer-lite-releases
+  RELEASES_REPO: justdiegocom/explorer-lite
 
 jobs:
   build:
@@ -118,18 +118,17 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
-      contents: write # the source tag vX.Y.Z here
+      contents: write # the release and its tag vX.Y.Z
     env:
       VERSION: ${{ needs.build.outputs.version }}
       TAG: ${{ needs.build.outputs.tag }}
       LAST: ${{ needs.build.outputs.last }}
       PRERELEASE: ${{ needs.build.outputs.mode == 'prerelease' }}
-      RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+      RELEASE_TOKEN: ${{ github.token }}
     steps:
       # a re-run after a failure halfway finds its own release already there and only does what is left
       - name: Guards
         run: |
-          [ -n "$RELEASE_TOKEN" ] || { echo "::error::missing the RELEASE_TOKEN secret (contents write on $RELEASES_REPO)"; exit 1; }
           if [ "$PRERELEASE" = true ]; then
             [[ $VERSION == *-* && $GITHUB_REF != refs/heads/main ]] || { echo "::error::bad prerelease $VERSION on $GITHUB_REF"; exit 1; }
           else
@@ -151,7 +150,7 @@ jobs:
           name: dist
           path: dist
 
-      - name: Release in explorer-lite-releases
+      - name: Release
         if: env.EXISTS != 'true'
         run: |
           cd dist
@@ -161,7 +160,7 @@ jobs:
           sha256sum -c "explorer-lite-Setup-$VERSION.exe.sha256" "explorer-lite-$VERSION-windows-x64.zip.sha256"
           # gh uploads into a draft and publishes it at the end: the app never sees a release without its files
           if [ "$PRERELEASE" = true ]; then flags=(--prerelease --latest=false); else flags=(--latest); fi
-          GH_TOKEN=$RELEASE_TOKEN gh release create "$TAG" "${files[@]}" --repo "$RELEASES_REPO" \
+          GH_TOKEN=$RELEASE_TOKEN gh release create "$TAG" "${files[@]}" --repo "$RELEASES_REPO" --target "$GITHUB_SHA" \
             --title "explorer-lite $VERSION" --notes-file notes.md "${flags[@]}"
 
       - name: Check what the app sees
@@ -206,5 +205,5 @@ jobs:
         if: env.PRERELEASE != 'true'
         working-directory: src
         env:
-          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: .github/release.sh prune-merged
