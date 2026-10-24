@@ -1,0 +1,11 @@
+# The cost of one window on Home (memory), nothing else.
+start --tray
+sleep 2000
+mem resident
+send
+sleep 3000
+mem window-home
+cmd closeall
+sleep 3000
+mem resident-after
+stop

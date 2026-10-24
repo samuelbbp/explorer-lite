@@ -62,6 +62,11 @@ package-mac version: (_cpu "mac")
 test-pc name: (_cpu "windows")
     tools/pc-test.sh {{name}}
 
+# installs dist/explorer-lite-Setup-VERSION.exe for real (silently, then again as an update) and checks it; results in
+# build/install/
+install-pc version: (_cpu "windows")
+    tools/pc-install.sh {{version}}
+
 # translations: the strings in the code (i18n/fuente.json) and every language has them all
 i18n:
     python3 i18n/extraer.py

@@ -361,10 +361,14 @@ LRESULT CALLBACK host_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_APP_UPDATE: on_update(); return 0;
     case WM_APP_KEYS: { // Win+E: a new window, as explorer opens one; Ctrl+Shift+Esc: the task manager
-        if (wp == KEY_TASKS && window_focus_tasks()) return 0;
-        WindowSpec s;
-        if (wp == KEY_TASKS) s.tab = TAB_TASKS;
-        window_open(s);
+        if (!(wp == KEY_TASKS && window_focus_tasks())) {
+            WindowSpec s;
+            if (wp == KEY_TASKS) s.tab = TAB_TASKS;
+            window_open(s);
+        }
+        DWORD pid = 0;
+        GetWindowThreadProcessId(GetForegroundWindow(), &pid);
+        log_line(std::string(wp == KEY_TASKS ? "keys: Ctrl+Shift+Esc" : "keys: Win+E") + (pid == GetCurrentProcessId() ? ", in front" : ", NOT in front"));
         return 0;
     }
     case WM_TIMER:

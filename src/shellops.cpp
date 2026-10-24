@@ -161,7 +161,7 @@ class Dropper final : public IDropTarget {
     }
 
 public:
-    Dropper(HWND w, DropHandler *h) : wnd_(w), h_(h) { CoCreateInstance(CLSID_DragDropHelper, NULL, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&helper_)); }
+    Dropper(HWND w, DropHandler *h) : wnd_(w), h_(h) {}
     ~Dropper() {
         release(inner_);
         release(data_);
@@ -188,6 +188,8 @@ public:
         data_->AddRef();
         inner_path_.clear();
         POINT pt = { p.x, p.y };
+        // the drag image's helper: made on the first drag, not with every window (it costs memory)
+        if (!helper_) CoCreateInstance(CLSID_DragDropHelper, NULL, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&helper_));
         if (helper_) helper_->DragEnter(wnd_, d, &pt, *effect);
         retarget(pt, keys, effect);
         h_->drop_hover(pt, true);

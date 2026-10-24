@@ -39,7 +39,8 @@ LRESULT CALLBACK hook(int code, WPARAM wp, LPARAM lp) {
                 int what = 0;
                 if (k->vkCode == 'E' && win && !ctrl && !shift && !alt) what = KEY_EXPLORER;
                 else if (k->vkCode == VK_ESCAPE && ctrl && shift && !win && !alt) what = KEY_TASKS;
-                if (what) {
+                // explorer-lite hung: the keys stay Windows' (its Task Manager has to be reachable)
+                if (what && !IsHungAppWindow(g_host)) {
                     g_swallow_up = k->vkCode;
                     dummy_key();
                     PostMessageW(g_host, g_msg, what, 0);
@@ -54,9 +55,11 @@ LRESULT CALLBACK hook(int code, WPARAM wp, LPARAM lp) {
 // the hook lives on its own thread: Windows waits for it on every key, so it never queues behind a window's paint
 DWORD WINAPI hook_thread(void *) {
     HHOOK h = SetWindowsHookExW(WH_KEYBOARD_LL, hook, GetModuleHandleW(NULL), 0);
+    log_line(h ? "keys: Win+E and Ctrl+Shift+Esc taken" : "keys: the hook failed (" + std::to_string(GetLastError()) + ")");
     MSG m;
     while (GetMessageW(&m, NULL, 0, 0) > 0) DispatchMessageW(&m);
     if (h) UnhookWindowsHookEx(h);
+    log_line("keys: released");
     return 0;
 }
 
