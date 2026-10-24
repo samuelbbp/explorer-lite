@@ -213,7 +213,9 @@ void tray_remove() {
     g_tray_added = false;
 }
 
-enum TrayCmd { TC_VERSION = 1, TC_OPEN, TC_TASKS, TC_STARTUP, TC_KEYS, TC_FOLDERS, TC_AUTO, TC_UPDATE, TC_QUIT, TC_LANG = 100 };
+void theme_menus();
+
+enum TrayCmd { TC_THEME = 90, TC_VERSION = 1, TC_OPEN, TC_TASKS, TC_STARTUP, TC_KEYS, TC_FOLDERS, TC_AUTO, TC_UPDATE, TC_QUIT, TC_LANG = 100 };
 
 void tray_menu() {
     HMENU m = CreatePopupMenu();
@@ -288,6 +290,35 @@ void tray_menu() {
         it.hbmpItem = b;
         InsertMenuItemW(m, (UINT)GetMenuItemCount(m), TRUE, &it);
     }
+    // Theme: dark, light or as Windows has it, the current one ticked
+    HMENU themes = CreatePopupMenu();
+    SetMenuInfo(themes, &mi);
+    const char *theme_ids[3] = { "dark", "light", "system" };
+    const wchar_t *theme_names[3] = { L"Dark", L"Light", L"Same as Windows" }; // translate
+    for (int i = 0; i < 3; i++) {
+        HBITMAP b = glyph_bitmap(theme_setting() == theme_ids[i] ? L"\xE73E" : L" ", px, kText);
+        if (b) bmps.push_back(b);
+        std::wstring t = T(theme_names[i]);
+        MENUITEMINFOW it = { sizeof(it) };
+        it.fMask = MIIM_ID | MIIM_STRING | MIIM_BITMAP | MIIM_FTYPE;
+        it.fType = MFT_STRING;
+        it.wID = TC_THEME + i;
+        it.dwTypeData = &t[0];
+        it.hbmpItem = b;
+        InsertMenuItemW(themes, (UINT)i, TRUE, &it);
+    }
+    {
+        HBITMAP b = glyph_bitmap(L"\xE790", px, kText);
+        if (b) bmps.push_back(b);
+        std::wstring t = T(L"Theme");
+        MENUITEMINFOW it = { sizeof(it) };
+        it.fMask = MIIM_SUBMENU | MIIM_STRING | MIIM_BITMAP | MIIM_FTYPE;
+        it.fType = MFT_STRING;
+        it.hSubMenu = themes;
+        it.dwTypeData = &t[0];
+        it.hbmpItem = b;
+        InsertMenuItemW(m, (UINT)GetMenuItemCount(m), TRUE, &it);
+    }
     AppendMenuW(m, MF_SEPARATOR, 0, NULL);
     add(TC_QUIT, L"\xE7E8", T(L"Quit"), false);
     SetMenuDefaultItem(m, TC_OPEN, FALSE);
@@ -321,6 +352,17 @@ void tray_menu() {
         else update_check(true);
         break;
     case TC_QUIT: app_quit(); break;
+    case TC_THEME:
+    case TC_THEME + 1:
+    case TC_THEME + 2: {
+        const char *ids[3] = { "dark", "light", "system" };
+        theme_set(ids[cmd - TC_THEME]);
+        if (theme_apply()) {
+            theme_menus();
+            window_update_changed();
+        }
+        break;
+    }
     default:
         if (cmd >= TC_LANG && (int)cmd < TC_LANG + nl) {
             set_ui_lang(ls[cmd - TC_LANG].code);
@@ -400,6 +442,12 @@ LRESULT CALLBACK host_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         delete c;
         return 0;
     }
+    case WM_SETTINGCHANGE: // Windows switched between light and dark apps: followed if the theme is "system"
+        if (lp && !wcscmp((const wchar_t *)lp, L"ImmersiveColorSet") && theme_apply()) {
+            theme_menus();
+            window_update_changed();
+        }
+        return 0;
     case WM_QUERYENDSESSION: return TRUE;
     case WM_ENDSESSION:
         if (wp) save_session();
@@ -409,15 +457,16 @@ LRESULT CALLBACK host_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     return DefWindowProcW(h, msg, wp, lp);
 }
 
-// Dark menus (the tray's): uxtheme's SetPreferredAppMode, by ordinal (undocumented, stable since 1903).
-void dark_menus() {
+// Menus in the theme's colours (the tray's, and the shell's context menus): uxtheme's SetPreferredAppMode, by
+// ordinal (undocumented, stable since 1903).
+void theme_menus() {
     HMODULE ux = LoadLibraryExW(L"uxtheme.dll", NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
     if (!ux) return;
     typedef int(WINAPI * PMode)(int);
     typedef void(WINAPI * PFlush)();
     auto set_mode = (PMode)(void *)GetProcAddress(ux, MAKEINTRESOURCEA(135));
     auto flush = (PFlush)(void *)GetProcAddress(ux, MAKEINTRESOURCEA(136));
-    if (set_mode) set_mode(2); // ForceDark: the theme is dark by default
+    if (set_mode) set_mode(theme_light() ? 3 : 2); // ForceLight, ForceDark
     if (flush) flush();
 }
 
@@ -529,7 +578,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     if (cmd.quit || !cmd.cmd.empty()) return 0; // nothing running
 
     OleInitialize(NULL); // drag and drop, the shell's context menus and dialogs
-    dark_menus();
+    theme_apply();
+    theme_menus();
     WNDCLASSEXW wc = { sizeof(wc) };
     wc.lpfnWndProc = host_proc;
     wc.hInstance = inst;

@@ -28,11 +28,13 @@ namespace {
 const float kTabH = 34, kToolH = 40, kNavW = 210, kHeadH = 30, kRowH = 28, kStatusH = 26, kScrollW = 10;
 const float kColDate = 150, kColType = 170, kColSize = 110, kNameMin = 180;
 const float kTileW = 124, kTileH = 150, kThumb = 96; // Large icons: a tile, and the picture in it
+const float kDriveW = 280, kDriveH = 70, kDriveIcon = 48; // This PC: a drive's tile
+const float kCapW = 46;                                 // the window's minimize / maximize / close buttons
 const size_t kThumbsKept = 200;                       // thumbnails kept per window (the ones on screen are asked again)
 
 enum Hit {
     H_NONE, H_TAB, H_TAB_CLOSE, H_TAB_NEW, H_BACK, H_FWD, H_UP, H_REFRESH, H_CRUMB, H_ADDRESS, H_NAV, H_HEAD, H_ROW,
-    H_SCROLL, H_LIST, H_UPDATE, H_TASKS, H_VIEW,
+    H_SCROLL, H_LIST, H_UPDATE, H_TASKS, H_VIEW, H_MIN, H_MAX, H_CLOSE,
 };
 
 struct Region {
@@ -138,15 +140,18 @@ float name_width(Win *w) {
     return std::max(kNameMin, (l.right - l.left - kScrollW) - kColDate - kColType - kColSize - 16);
 }
 
-bool is_grid(View &v) { return v.grid && v.kind == TAB_FILES; }
+bool is_drives(View &v) { return v.kind == TAB_FILES && v.path == kThisPC; }
+bool is_grid(View &v) { return v.kind == TAB_FILES && (v.grid || is_drives(v)); } // tiles: Large icons or This PC
+float tile_w(View &v) { return is_drives(v) ? kDriveW : kTileW; }
+float tile_h(View &v) { return is_drives(v) ? kDriveH : kTileH; }
 
 // Large icons: tiles per line; Details: one row per line
 int per_line(Win *w, View &v) {
     if (!is_grid(v)) return 1;
     D2D1_RECT_F l = list_rect(w);
-    return std::max(1, (int)((l.right - l.left - kScrollW - 8) / kTileW));
+    return std::max(1, (int)((l.right - l.left - kScrollW - 8) / tile_w(v)));
 }
-float line_h(View &v) { return is_grid(v) ? kTileH : kRowH; }
+float line_h(View &v) { return is_grid(v) ? tile_h(v) : kRowH; }
 
 float content_h(Win *w, View &v) {
     int per = per_line(w, v);
@@ -159,8 +164,8 @@ D2D1_RECT_F item_rect(Win *w, View &v, int pos) {
     int per = per_line(w, v);
     float y = l.top + (pos / per) * line_h(v) - v.scroll;
     if (!is_grid(v)) return D2D1::RectF(l.left + 4, y + 1, l.right - kScrollW - 2, y + kRowH - 1);
-    float x = l.left + 6 + (pos % per) * kTileW;
-    return D2D1::RectF(x + 2, y + 4, x + kTileW - 2, y + kTileH - 2);
+    float x = l.left + 6 + (pos % per) * tile_w(v);
+    return D2D1::RectF(x + 2, y + 4, x + tile_w(v) - 2, y + tile_h(v) - 2);
 }
 
 void clamp_scroll(Win *w, View &v) {
@@ -424,7 +429,7 @@ void on_listing(Win *w, Listing *l) {
         v.error = l->error;
         v.loading = false;
         v.list_ms = l->ms;
-        if (!v.path.empty()) folder_sort(v.all, v.sort, v.desc); // Home keeps its order: places, then drives
+        if (!folder_virtual(v.path)) folder_sort(v.all, v.sort, v.desc); // Home and This PC keep their order
         v.sel.assign(v.all.size(), 0);
         v.focus = -1;
         apply_filter(v);
@@ -653,7 +658,7 @@ void edit_address(Win *w) {
     if (v.kind != TAB_FILES) return;
     float s = scale(w);
     D2D1_RECT_F r = address_rect(w);
-    SetWindowTextW(w->edit, v.path.empty() ? T(L"Home") : v.path.c_str());
+    SetWindowTextW(w->edit, folder_virtual(v.path) ? folder_title(v.path).c_str() : v.path.c_str());
     int x = (int)std::lround((r.left + 8) * s), y = (int)std::lround((r.top + 6) * s);
     SetWindowPos(w->edit, HWND_TOP, x, y, (int)std::lround((r.right - 8) * s) - x, (int)std::lround((r.bottom - 5) * s) - y, SWP_SHOWWINDOW);
     SetFocus(w->edit);
@@ -663,7 +668,7 @@ void edit_address(Win *w) {
 // F2: the focused item's name becomes an edit box over its row (the extension left out of the selection)
 void start_rename(Win *w) {
     View &v = cur_view(w);
-    if (v.kind != TAB_FILES || v.path.empty() || v.focus < 0 || !w->rename) return;
+    if (v.kind != TAB_FILES || folder_virtual(v.path) || v.focus < 0 || !w->rename) return;
     const Item &it = v.all[v.shown[v.focus]];
     ensure_visible(w, v, v.focus);
     float s = scale(w);
@@ -699,7 +704,7 @@ void new_folder(Win *w) {
 
 void draw_tabs(Win *w, D2D1_RECT_F c) {
     fill(w, D2D1::RectF(0, 0, c.right, kTabH), kTabBar);
-    float x = 8, tw = std::min(220.f, std::max(110.f, (c.right - 60) / std::max<size_t>(1, w->views.size())));
+    float x = 8, tw = std::min(220.f, std::max(110.f, (c.right - 100 - 3 * kCapW) / std::max<size_t>(1, w->views.size())));
     for (int i = 0; i < (int)w->views.size(); i++) {
         D2D1_RECT_F r = D2D1::RectF(x, 5, x + tw, kTabH);
         bool on = i == w->cur;
@@ -720,6 +725,31 @@ void draw_tabs(Win *w, D2D1_RECT_F c) {
     region(w, plus, H_TAB_NEW);
     if (hovered(w, H_TAB_NEW)) fill_round(w, plus, 4, kHover);
     text(w, L"\xE710", plus, w->f_icon_s, kText);
+    // the window has no title bar: the tabs are it, with Windows' three buttons at the right (WM_NCHITTEST)
+    bool zoomed = IsZoomed(w->hwnd);
+    const wchar_t *glyphs[3] = { L"\xE921", zoomed ? L"\xE923" : L"\xE922", L"\xE8BB" };
+    int ids[3] = { H_MIN, H_MAX, H_CLOSE };
+    for (int i = 0; i < 3; i++) {
+        D2D1_RECT_F r = D2D1::RectF(c.right - (3 - i) * kCapW, 0, c.right - (2 - i) * kCapW, kTabH);
+        region(w, r, ids[i]);
+        bool hot = w->hover == ids[i], close = ids[i] == H_CLOSE;
+        if (hot) fill(w, r, close ? 0xC42B1C : w->press == ids[i] ? kPress : kHover, close && w->press == ids[i] ? 0.85f : 1);
+        text(w, glyphs[i], r, w->f_icon_s, hot && close ? 0xFFFFFF : kText);
+    }
+}
+
+// Windows' resize border, in pixels: also what a maximized window hangs off the screen
+int frame_px(HWND h) {
+    UINT dpi = GetDpiForWindow(h);
+    return GetSystemMetricsForDpi(SM_CYFRAME, dpi) + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
+}
+
+int caption_hit(int id) { return id == H_MIN ? HTMINBUTTON : id == H_MAX ? HTMAXBUTTON : id == H_CLOSE ? HTCLOSE : 0; }
+int caption_id(WPARAM hit) { return hit == HTMINBUTTON ? H_MIN : hit == HTMAXBUTTON ? H_MAX : hit == HTCLOSE ? H_CLOSE : H_NONE; }
+
+void apply_theme(Win *w) {
+    BOOL dark = !theme_light();
+    DwmSetWindowAttribute(w->hwnd, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, &dark, sizeof(dark));
 }
 
 void draw_toolbar(Win *w, D2D1_RECT_F c) {
@@ -778,14 +808,21 @@ void draw_toolbar(Win *w, D2D1_RECT_F c) {
     }
 }
 
+// the navigation pane's second group: This PC, and its drives under it
+std::vector<Place> nav_drives() {
+    std::vector<Place> out = { { T(L"This PC"), kThisPC, L"\xE7F4" } };
+    for (Place &p : folder_drives()) out.push_back(p);
+    return out;
+}
+
 void draw_nav(Win *w, D2D1_RECT_F c) {
     View &v = cur_view(w);
     D2D1_RECT_F pane = D2D1::RectF(0, kTabH + kToolH, kNavW, c.bottom - kStatusH);
     fill(w, pane, kPane);
     float y = pane.top + 8;
     int i = 0;
-    auto row = [&](const Place &p, int idx) {
-        D2D1_RECT_F r = D2D1::RectF(6, y, kNavW - 6, y + 30);
+    auto row = [&](const Place &p, int idx, float indent = 0) {
+        D2D1_RECT_F r = D2D1::RectF(6 + indent, y, kNavW - 6, y + 30);
         bool on = v.kind == TAB_FILES && !_wcsicmp(p.path.c_str(), v.path.c_str());
         region(w, r, H_NAV, idx);
         if (on) fill_round(w, r, 5, kTabOn);
@@ -799,7 +836,7 @@ void draw_nav(Win *w, D2D1_RECT_F c) {
     y += 6;
     fill(w, D2D1::RectF(14, y, kNavW - 14, y + 1), kLine);
     y += 8;
-    for (const Place &p : w->drives) row(p, i++);
+    for (size_t d = 0; d < w->drives.size(); d++) row(w->drives[d], i++, d ? 16.f : 0.f); // the drives under This PC
     y += 6;
     fill(w, D2D1::RectF(14, y, kNavW - 14, y + 1), kLine);
     y += 8;
@@ -827,7 +864,8 @@ void draw_list(Win *w, D2D1_RECT_F c) {
     xs[COL_COUNT] = xs[COL_SIZE] + kColSize;
     const wchar_t *heads[COL_COUNT] = { L"Name", L"Date modified", L"Type", L"Size" }; // translate
     float hy = kTabH + kToolH;
-    for (int i = 0; i < COL_COUNT; i++) {
+    if (is_drives(v)) text(w, T(L"Devices and drives"), D2D1::RectF(l.left + 12, hy, l.right, hy + kHeadH), w->f_small, kDim);
+    else for (int i = 0; i < COL_COUNT; i++) {
         D2D1_RECT_F r = D2D1::RectF(xs[i] - 4, hy + 2, xs[i + 1] - 4, hy + kHeadH - 2);
         region(w, r, H_HEAD, i);
         if (hovered(w, H_HEAD, i)) fill_round(w, r, 4, kHover);
@@ -857,6 +895,22 @@ void draw_list(Win *w, D2D1_RECT_F c) {
                 w->br->SetColor(p == w->drop_row ? color(kAccent) : color(kDim, 0.6f));
                 w->dc->DrawRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(tile.left + 0.5f, tile.top + 0.5f, tile.right - 0.5f, tile.bottom - 0.5f), 5, 5), w->br,
                                             p == w->drop_row ? 2.f : 1.f);
+            }
+            if (is_drives(v)) { // the drive's icon, its name, how full it is and what is left
+                float iy = (tile.top + tile.bottom - kDriveIcon) / 2;
+                if (ID2D1Bitmap *b = thumb_bitmap(w, v, it))
+                    w->dc->DrawBitmap(b, D2D1::RectF(tile.left + 8, iy, tile.left + 8 + kDriveIcon, iy + kDriveIcon), 1, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+                else draw_icon(w, it.icon, tile.left + 8 + 8, iy + 8, 32);
+                float x0 = tile.left + 16 + kDriveIcon, x1 = tile.right - 10;
+                text(w, it.name, D2D1::RectF(x0, tile.top + 6, x1, tile.top + 26), w->f_ui, kText);
+                if (it.bytes) {
+                    D2D1_RECT_F bar = D2D1::RectF(x0, tile.top + 30, x1, tile.top + 38);
+                    float used = 1 - (float)((double)it.free_bytes / (double)it.bytes);
+                    fill(w, bar, kLine);
+                    fill(w, D2D1::RectF(bar.left, bar.top, bar.left + (bar.right - bar.left) * used, bar.bottom), used > 0.9f ? kDanger : kAccent);
+                    text(w, it.size, D2D1::RectF(x0, tile.top + 40, x1, tile.top + 60), w->f_small, kDim);
+                } else text(w, it.type, D2D1::RectF(x0, tile.top + 30, x1, tile.top + 50), w->f_small, kDim);
+                continue;
             }
             float cx = (tile.left + tile.right) / 2, top = tile.top + 6;
             if (ID2D1Bitmap *b = thumb_bitmap(w, v, it)) {
@@ -947,7 +1001,7 @@ void draw_status(Win *w, D2D1_RECT_F c) {
         left = tasks_status(v.tasks);
     }
     text(w, left, D2D1::RectF(s.left + 12, s.top, s.right * 0.6f, s.bottom), w->f_small, kDim);
-    if (v.kind == TAB_FILES) {
+    if (v.kind == TAB_FILES && !is_drives(v)) {
         const wchar_t *glyphs[2] = { L"\xE8FD", L"\xE8A9" }; // Details, Large icons
         for (int i = 0; i < 2; i++) {
             D2D1_RECT_F b = D2D1::RectF(s.right - 62 + i * 28, s.top + 2, s.right - 36 + i * 28, s.bottom - 2);
@@ -974,7 +1028,7 @@ void draw_status(Win *w, D2D1_RECT_F c) {
         region(w, b, H_UPDATE);
         fill_round(w, b, 4, kAccent, hovered(w, H_UPDATE) ? 1 : 0.85f);
         w->f_small->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
-        text(w, t, b, w->f_small, 0x000000);
+        text(w, t, b, w->f_small, kOnAccent);
         w->f_small->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
     }
 }
@@ -1059,7 +1113,7 @@ int row_at(Win *w, float x, float y) {
     View &v = cur_view(w);
     D2D1_RECT_F l = list_rect(w);
     int per = per_line(w, v), line = (int)std::floor((y - l.top + v.scroll) / line_h(v));
-    int col = is_grid(v) ? (int)std::floor((x - l.left - 6) / kTileW) : 0;
+    int col = is_grid(v) ? (int)std::floor((x - l.left - 6) / tile_w(v)) : 0;
     if (line < 0 || col < 0 || col >= per) return -1;
     int p = line * per + col;
     if (p >= (int)v.shown.size()) return -1;
@@ -1275,7 +1329,7 @@ bool on_key(Win *w, WPARAM key) {
     int per = per_line(w, v), page = std::max(1, (int)((l.bottom - l.top) / line_h(v)) - 1) * per;
     if (ctrl && key == 'T') return new_tab(w, v.kind == TAB_FILES ? v.path : L""), true;
     if (ctrl && key == 'W') return close_tab(w, w->cur), true;
-    if (ctrl && shift && key == 'N' && v.kind == TAB_FILES) return new_folder(w), true;
+    if (ctrl && shift && key == 'N' && v.kind == TAB_FILES && !folder_virtual(v.path)) return new_folder(w), true;
     if (ctrl && shift && (key == '2' || key == '6')) return set_grid(w, key == '2'), true; // Windows' keys: Large icons, Details
     if (ctrl && key == 'N') {
         WindowSpec s;
@@ -1306,7 +1360,7 @@ bool on_key(Win *w, WPARAM key) {
         return true;
     }
     // what Windows' shell does with the selection (Home's entries are places, not files to delete or rename)
-    bool in_folder = !v.path.empty();
+    bool in_folder = !folder_virtual(v.path);
     if (key == VK_DELETE && in_folder) return shell_delete(w->hwnd, selected_targets(v), shift, conf_get("confirm_delete") != "0"), true;
     if (key == VK_F2 && in_folder) return start_rename(w), true;
     if (ctrl && key == 'C') return shell_clipboard(w->hwnd, selected_targets(v), false), true;
@@ -1474,11 +1528,65 @@ LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_CONTEXTMENU:
         if (context_menu(w, lp)) return 0;
         break;
+    case WM_NCCALCSIZE: // no title bar: the client reaches the top edge (the sides and bottom keep their borders)
+        if (wp) {
+            auto *p = (NCCALCSIZE_PARAMS *)lp;
+            LONG top = p->rgrc[0].top;
+            LRESULT r = DefWindowProcW(h, msg, wp, lp);
+            p->rgrc[0].top = top + (IsZoomed(h) ? frame_px(h) : 0); // maximized, the window hangs off the screen by that
+            return r;
+        }
+        break;
+    case WM_NCHITTEST: {
+        LRESULT r = DefWindowProcW(h, msg, wp, lp);
+        if (r != HTCLIENT) return r;
+        POINT pt = { GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+        ScreenToClient(h, &pt);
+        if (!IsZoomed(h) && pt.y < frame_px(h)) return HTTOP;
+        float x = pt.x / s, y = pt.y / s;
+        if (y >= kTabH) return HTCLIENT;
+        if (const Region *rg = hit(w, x, y)) return caption_hit(rg->id) ? caption_hit(rg->id) : HTCLIENT; // a tab, +
+        return HTCAPTION; // the empty part of the tab bar moves the window (and a double click maximizes it)
+    }
+    case WM_NCMOUSEMOVE: {
+        int id = caption_id(wp);
+        if (id != w->hover || (id && w->hover_arg)) {
+            w->hover = id;
+            w->hover_arg = 0;
+            redraw(w);
+        }
+        TRACKMOUSEEVENT t = { sizeof(t), TME_LEAVE | TME_NONCLIENT, h, 0 };
+        TrackMouseEvent(&t);
+        if (id) return 0;
+        break;
+    }
+    case WM_NCMOUSELEAVE:
+        if (caption_hit(w->hover)) {
+            w->hover = H_NONE;
+            w->press = H_NONE;
+            redraw(w);
+        }
+        break;
+    case WM_NCLBUTTONDOWN:
+    case WM_NCLBUTTONDBLCLK:
+        if (int id = caption_id(wp)) { // our buttons: Windows would draw its old ones
+            w->press = id;
+            redraw(w);
+            return 0;
+        }
+        break;
+    case WM_NCLBUTTONUP:
+        if (int id = caption_id(wp)) {
+            if (w->press == id)
+                PostMessageW(h, WM_SYSCOMMAND, id == H_MIN ? SC_MINIMIZE : id == H_CLOSE ? SC_CLOSE : IsZoomed(h) ? SC_RESTORE : SC_MAXIMIZE, 0);
+            w->press = H_NONE;
+            redraw(w);
+            return 0;
+        }
+        break;
     case WM_CREATE: {
-        BOOL dark = TRUE;
-        DwmSetWindowAttribute(h, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, &dark, sizeof(dark));
-        COLORREF cap = RGB((kTabBar >> 16) & 255, (kTabBar >> 8) & 255, kTabBar & 255);
-        DwmSetWindowAttribute(h, 35 /* DWMWA_CAPTION_COLOR */, &cap, sizeof(cap)); // the caption joins the tab bar
+        apply_theme(w);
+        SetWindowPos(h, NULL, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE); // WM_NCCALCSIZE again
         w->dpi = GetDpiForWindow(h);
         w->edit = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | ES_AUTOHSCROLL, 0, 0, 0, 0, h, (HMENU)1, g_inst, NULL);
         w->search = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | ES_AUTOHSCROLL, 0, 0, 0, 0, h, (HMENU)2, g_inst, NULL);
@@ -1491,12 +1599,12 @@ LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         ChangeWindowMessageFilterEx(h, WM_COPYDATA, MSGFLT_ALLOW, NULL); // Everything may run elevated
         shell_register_drop(h, w->drop);
         w->places = folder_places();
-        w->drives = folder_drives();
+        w->drives = nav_drives();
         return 0;
     }
     case WM_CTLCOLOREDIT: {
         HDC dc = (HDC)wp;
-        SetTextColor(dc, RGB(242, 242, 242));
+        SetTextColor(dc, RGB((kText >> 16) & 255, (kText >> 8) & 255, kText & 255));
         SetBkColor(dc, RGB((kBg >> 16) & 255, (kBg >> 8) & 255, kBg & 255));
         if (!g_edit_brush) g_edit_brush = CreateSolidBrush(RGB((kBg >> 16) & 255, (kBg >> 8) & 255, kBg & 255));
         return (LRESULT)g_edit_brush;
@@ -1591,7 +1699,7 @@ LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_ACTIVATE:
         if (LOWORD(wp) != WA_INACTIVE) w->last_used = ++g_use;
         break;
-    case WM_DEVICECHANGE: w->drives = folder_drives(); redraw(w); return TRUE;
+    case WM_DEVICECHANGE: w->drives = nav_drives(); redraw(w); return TRUE;
     case WM_APP_LIST: on_listing(w, (Listing *)lp); return 0;
     case WM_COPYDATA: { // Everything's answer to a search
         auto *cds = (COPYDATASTRUCT *)lp;
@@ -1628,7 +1736,7 @@ LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             static DWORD ids;
             if (v.filter.empty()) {
                 if (v.results) load(w, v); // back to the folder
-            } else if (!folder_search(h, v.search_id = ++ids, v.path, v.filter)) v.search_id = 0;
+            } else if (!folder_search(h, v.search_id = ++ids, folder_virtual(v.path) ? L"" : v.path, v.filter)) v.search_id = 0;
             return 0;
         }
         if (wp == 7) {
@@ -1941,8 +2049,16 @@ void window_command(const std::wstring &verb, const std::wstring &arg) {
 }
 
 void window_update_changed() {
+    if (g_edit_brush) { // the theme may have changed: the edit boxes' background too
+        DeleteObject(g_edit_brush);
+        g_edit_brush = NULL;
+    }
     for (Win *w : g_wins) {
+        apply_theme(w);
+        for (HWND e : { w->edit, w->search, w->rename })
+            if (e) InvalidateRect(e, NULL, TRUE);
         w->places = folder_places(); // the language may have changed: their names too
+        w->drives = nav_drives();
         if (!w->views.empty()) {
             set_title(w);
             sync_search(w);

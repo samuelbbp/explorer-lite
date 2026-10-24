@@ -113,6 +113,30 @@ void list_home(Listing &l) {
     }
 }
 
+// This PC: the drives, with their size and free space
+void list_pc(Listing &l) {
+    for (const Place &p : folder_drives()) {
+        Item it;
+        it.name = p.label;
+        it.target = p.path;
+        it.dir = true;
+        it.attr = FILE_ATTRIBUTE_DIRECTORY;
+        SHFILEINFOW fi = {};
+        if (SHGetFileInfoW(p.path.c_str(), 0, &fi, sizeof(fi), SHGFI_SYSICONINDEX | SHGFI_SMALLICON | SHGFI_TYPENAME)) {
+            it.icon = fi.iIcon;
+            it.type = fi.szTypeName;
+        }
+        ULARGE_INTEGER free_bytes, total;
+        // only local disks: a network or removable drive can take seconds to answer
+        if (GetDriveTypeW(p.path.c_str()) == DRIVE_FIXED && GetDiskFreeSpaceExW(p.path.c_str(), &free_bytes, &total, NULL)) {
+            it.bytes = total.QuadPart;
+            it.free_bytes = free_bytes.QuadPart;
+            it.size = Tf(L"{0} free of {1}", { format_bytes(free_bytes.QuadPart), format_bytes(total.QuadPart) });
+        }
+        l.items.push_back(it);
+    }
+}
+
 void list_dir(Listing &l) {
     std::wstring pattern = folder_join(l.path, L"*");
     WIN32_FIND_DATAW fd;
@@ -177,6 +201,7 @@ DWORD WINAPI list_thread(void *p) {
     CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     double t0 = now_ms();
     if (l->path.empty()) list_home(*l);
+    else if (l->path == kThisPC) list_pc(*l);
     else list_dir(*l);
     l->ms = now_ms() - t0;
     std::vector<std::wstring> later;
@@ -320,8 +345,13 @@ std::wstring folder_join(const std::wstring &dir, const std::wstring &name) {
     return dir.back() == L'\\' ? dir + name : dir + L"\\" + name;
 }
 
+const wchar_t kThisPC[] = L"::{20D04FE0-3AEA-1069-A2D8-08002B30309D}";
+
+bool folder_virtual(const std::wstring &path) { return path.empty() || path == kThisPC; }
+
 std::wstring folder_parent(const std::wstring &path) {
-    if (path.size() <= 3) return L""; // "C:\" -> Home
+    if (path == kThisPC) return L"";
+    if (path.size() <= 3) return path.size() >= 2 && path[1] == L':' ? kThisPC : L""; // "C:\" -> This PC
     std::wstring p = path;
     while (p.size() > 3 && p.back() == L'\\') p.pop_back();
     size_t slash = p.find_last_of(L'\\');
@@ -336,6 +366,7 @@ std::wstring folder_parent(const std::wstring &path) {
 
 std::wstring folder_title(const std::wstring &path) {
     if (path.empty()) return T(L"Home");
+    if (path == kThisPC) return T(L"This PC");
     for (const Place &p : folder_places())
         if (!p.path.empty() && !_wcsicmp(p.path.c_str(), path.c_str())) return p.label;
     if (path.size() <= 3 && path.size() >= 2 && path[1] == L':') return path.substr(0, 2);
@@ -346,7 +377,7 @@ std::wstring folder_title(const std::wstring &path) {
 }
 
 bool folder_exists(const std::wstring &path) {
-    if (path.empty()) return true;
+    if (folder_virtual(path)) return true;
     DWORD a = GetFileAttributesW(path.c_str());
     return a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
 }
@@ -363,6 +394,7 @@ std::wstring folder_normalize(const std::wstring &typed) {
         if (ch == L'/') ch = L'\\';
     if (s.size() == 2 && s[1] == L':') s += L'\\'; // "C:" is the drive's root, not its current folder
     if (!_wcsicmp(s.c_str(), L"home") || !_wcsicmp(s.c_str(), T(L"Home"))) return L"";
+    if (!_wcsicmp(s.c_str(), L"this pc") || !_wcsicmp(s.c_str(), T(L"This PC")) || !_wcsicmp(s.c_str(), kThisPC)) return kThisPC;
     wchar_t full[32768];
     if (!s.empty() && GetFullPathNameW(s.c_str(), ARRAYSIZE(full), full, NULL)) s = full;
     if (s.size() > 3 && s.back() == L'\\') s.pop_back();

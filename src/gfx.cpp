@@ -1,5 +1,6 @@
 // gfx.cpp: see gfx.h.
 #include "gfx.h"
+#include "conf.h"
 
 ID2D1Factory *g_d2d;
 IDWriteFactory *g_dw;
@@ -89,4 +90,42 @@ HBITMAP glyph_bitmap(const wchar_t *glyph, int px, uint32_t rgb) {
     SelectObject(dc, old);
     DeleteDC(dc);
     return dib;
+}
+
+// --- the theme ---------------------------------------------------------------------------------------------------
+
+uint32_t kBg, kPane, kTabBar, kTabOn, kHover, kPress, kLine, kText, kDim, kAccent, kOnAccent, kSelect, kDanger;
+namespace {
+bool g_light = false, g_set = false;
+
+bool windows_light() { // HKCU ...\Themes\Personalize AppsUseLightTheme (1 = light apps)
+    DWORD v = 0, size = sizeof(v);
+    return RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize", L"AppsUseLightTheme", RRF_RT_REG_DWORD, NULL, &v,
+                        &size) == ERROR_SUCCESS && v == 1;
+}
+} // namespace
+
+std::string theme_setting() {
+    std::string t = conf_get("theme");
+    return t == "light" || t == "system" ? t : "dark";
+}
+
+void theme_set(const std::string &name) { conf_set("theme", name); }
+
+bool theme_light() { return g_light; }
+
+bool theme_apply() {
+    std::string t = theme_setting();
+    bool light = t == "light" || (t == "system" && windows_light());
+    if (g_set && light == g_light) return false;
+    g_set = true;
+    g_light = light;
+    if (light) { // Windows 11's explorer, light
+        kBg = 0xFFFFFF, kPane = 0xF7F7F7, kTabBar = 0xE8E8E8, kTabOn = 0xE5E5E5, kHover = 0xEDEDED, kPress = 0xDCDCDC, kLine = 0xE0E0E0;
+        kText = 0x1A1A1A, kDim = 0x5F5F5F, kAccent = 0x005FB8, kOnAccent = 0xFFFFFF, kSelect = 0xCCE4F7, kDanger = 0xC42B1C;
+    } else {
+        kBg = 0x1C1C1C, kPane = 0x202020, kTabBar = 0x161616, kTabOn = 0x2B2B2B, kHover = 0x2D2D2D, kPress = 0x383838, kLine = 0x333333;
+        kText = 0xF2F2F2, kDim = 0x9E9E9E, kAccent = 0x4CC2FF, kOnAccent = 0x000000, kSelect = 0x1F4A6E, kDanger = 0xFF6B6B;
+    }
+    return true;
 }

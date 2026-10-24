@@ -1,0 +1,20 @@
+# The same in the light theme.
+conf language=en
+conf theme=light
+start --tray
+sleep 2000
+send
+sleep 2000
+cmd size 1180x720
+cmd go This PC
+sleep 2500
+shot thispc-light
+cmd go C:\Windows
+sleep 1500
+shot windows-light
+cmd tasks
+sleep 4000
+shot tasks-light
+cmd closeall
+sleep 1000
+stop
