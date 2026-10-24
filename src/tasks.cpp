@@ -853,15 +853,16 @@ uint32_t res_color(int kind) {
     }
 }
 
-// a round top for a graph's scale: 1, 2 or 5 times a power of ten
-double nice_max(const std::vector<float> &a, const std::vector<float> &b, double floor) {
+// a round top for a graph's scale: 1, 2 or 5 times a power of ten of unit (1048576: in MB/s)
+double nice_max(const std::vector<float> &a, const std::vector<float> &b, double floor, double unit = 1) {
     double v = floor;
     for (float x : a) v = std::max(v, (double)x);
     for (float x : b) v = std::max(v, (double)x);
+    v /= unit;
     double p = std::pow(10.0, std::floor(std::log10(v)));
     for (double m : { 1.0, 2.0, 5.0 })
-        if (m * p >= v) return m * p;
-    return 10 * p;
+        if (m * p >= v) return m * p * unit;
+    return 10 * p * unit;
 }
 
 void series(TasksView *t, ID2D1RenderTarget *rt, ID2D1SolidColorBrush *br, D2D1_RECT_F g, const std::vector<float> &h, double max, uint32_t rgb, bool fill,
@@ -1048,7 +1049,7 @@ void draw_perf(TasksView *t, ID2D1RenderTarget *rt, ID2D1SolidColorBrush *br, ID
     }
     y += main_h;
     if (p.kind == RK_DISK) {
-        double m = nice_max(p.h2, p.h3, 1048576);
+        double m = nice_max(p.h2, p.h3, 1048576, 1048576);
         text(rt, br, T(L"Disk transfer rate (read solid, write dashed)"), D2D1::RectF(x0, y, x1 - 120, y + label), small, kDim);
         text_right(rt, br, bytes_rate(m), D2D1::RectF(x1 - 160, y, x1, y + label), small, kDim);
         graph(t, rt, br, D2D1::RectF(x0, y + label, x1, r.bottom - details - 8), col, p.h2, m, &p.h3);
@@ -1171,9 +1172,9 @@ void draw_processes(TasksView *t, ID2D1RenderTarget *rt, ID2D1SolidColorBrush *b
             rt->FillRectangle(D2D1::RectF(c.left, head + 6, c.left + 1, hb - 6), br);
         }
         if (i >= TC_CPU) {
-            bool known = i != TC_GPU || ps.has_gpu;
-            text_right(rt, br, known && !t->cur.procs.empty() ? num(totals[i], 0) + L"%" : L"", D2D1::RectF(c.left, head + 6, c.right - 8, head + 30), t->f_total,
-                       kText);
+            bool known = (i != TC_GPU || ps.has_gpu) && !t->cur.procs.empty();
+            std::wstring total = known ? num(totals[i], 0) + L"%" : L"";
+            text_right(rt, br, total, D2D1::RectF(c.left, head + 6, c.right - 8, head + 30), t->f_total, kText);
             text_right(rt, br, T(heads[i]), D2D1::RectF(c.left, head + 30, c.right - 8, hb - 4), small, kDim);
         } else text(rt, br, T(heads[i]), D2D1::RectF(c.left + 6, head + 30, c.right, hb - 4), small, kDim);
         if (t->sort == i) text(rt, br, t->desc ? L"\xE70D" : L"\xE70E", D2D1::RectF(c.left, head, c.right, head + 10), icons, kDim);

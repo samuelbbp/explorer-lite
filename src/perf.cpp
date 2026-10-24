@@ -257,7 +257,9 @@ void net_ips(Perf *p, uint64_t luid, NetPrev &np) {
     ULONG r = ERROR_BUFFER_OVERFLOW;
     for (int tries = 0; tries < 3 && r == ERROR_BUFFER_OVERFLOW; tries++) {
         buf.resize(len);
-        r = p->addrs(AF_UNSPEC, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER | GAA_FLAG_SKIP_FRIENDLY_NAME | 0x0800 /* GAA_FLAG_SKIP_DNS_INFO */, NULL, (IP_ADAPTER_ADDRESSES *)buf.data(), &len);
+        // no DNS: it would load the DNS client for nothing
+        ULONG flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER | GAA_FLAG_SKIP_FRIENDLY_NAME | 0x0800 /* SKIP_DNS_INFO */;
+        r = p->addrs(AF_UNSPEC, flags, NULL, (IP_ADAPTER_ADDRESSES *)buf.data(), &len);
     }
     if (r != NO_ERROR) return;
     HMODULE nt = GetModuleHandleW(L"ntdll.dll");
