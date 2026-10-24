@@ -17,6 +17,7 @@
 #include "folder.h"
 #include "gfx.h"
 #include "idioma.h"
+#include "shellops.h"
 #include "tasks.h"
 #include "update.h"
 
@@ -51,6 +52,7 @@ struct View {
     bool loading = false;
     std::wstring error, filter;
     std::wstring select_after;         // after going up: the folder we came from is selected
+    bool rename_after = false;         // a new folder: renamed as soon as it shows up
     double list_ms = 0;
     TasksView *tasks = nullptr;
 };
@@ -78,6 +80,15 @@ struct Win {
     double opened_at = 0;              // when window_open was called, until the first frame is drawn
     double t_created = 0, t_target = 0; // how long the window and the render target took (logged with the first frame)
     std::vector<Place> places, drives;
+    HWND rename = NULL;                // the name being edited (F2), over its row
+    std::wstring rename_target;
+    ULONG watch = 0;                   // change notifications for the folder shown
+    std::wstring watched;
+    DropHandler *drop = nullptr;
+    int drop_row = -1;                 // the folder row a drag hovers (highlighted)
+    bool drag_maybe = false;           // a row pressed: a drag starts if the mouse moves far enough
+    POINT drag_from = {};
+    int collapse_to = -1;              // a click on a selected row: the selection collapses on release, unless dragged
 };
 
 std::vector<Win *> g_wins;
@@ -256,11 +267,21 @@ void apply_filter(View &v) {
     v.anchor = v.focus;
 }
 
+// the folder on screen gets Windows' change notifications: what other programs (or our own operations) do shows up
+void watch(Win *w) {
+    std::wstring path = w->views.empty() || cur_view(w).kind != TAB_FILES ? L"" : cur_view(w).path;
+    if (w->watch && !_wcsicmp(path.c_str(), w->watched.c_str())) return;
+    shell_unwatch(w->watch);
+    w->watched = path;
+    w->watch = shell_watch(w->hwnd, WM_APP_CHANGED, path);
+}
+
 void load(Win *w, View &v) {
     if (v.gen) folder_forget(v.gen);
     v.gen = ++g_gen;
     v.loading = true;
     folder_list(w->hwnd, v.gen, v.path);
+    watch(w);
     redraw(w);
 }
 
@@ -313,6 +334,8 @@ void go_up(Win *w) {
     cur_view(w).select_after = from;
 }
 
+void start_rename(Win *w);
+
 void on_listing(Win *w, Listing *l) {
     log_line("listed " + std::to_string(l->items.size()) + " items in " + std::to_string((int)l->ms) + " ms");
     for (View &v : w->views) {
@@ -340,7 +363,9 @@ void on_listing(Win *w, Listing *l) {
         v.select_after.clear();
         if (refresh) v.scroll = keep_scroll;
         clamp_scroll(w, v);
-        if (!refresh) ensure_visible(w, v, v.focus);
+        if (!refresh || v.rename_after) ensure_visible(w, v, v.focus);
+        if (v.rename_after && &v == &cur_view(w) && v.focus >= 0) start_rename(w);
+        v.rename_after = false;
     }
     delete l;
     redraw(w);
@@ -358,6 +383,7 @@ void new_tab(Win *w, const std::wstring &path, int kind = TAB_FILES) {
     sync_search(w);
     set_title(w);
     if (kind == TAB_FILES) load(w, cur_view(w));
+    else watch(w);
     redraw(w);
 }
 
@@ -374,6 +400,7 @@ void close_tab(Win *w, int i) {
     else if (w->cur > i) w->cur--;
     sync_search(w);
     set_title(w);
+    watch(w);
     redraw(w);
 }
 
@@ -382,6 +409,7 @@ void switch_tab(Win *w, int i) {
     w->cur = i;
     sync_search(w);
     set_title(w);
+    watch(w);
     redraw(w);
 }
 
@@ -452,6 +480,25 @@ HBRUSH g_edit_brush;
 
 LRESULT CALLBACK edit_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR id, DWORD_PTR data) {
     Win *w = (Win *)data;
+    if (id == 3) { // renaming: Enter or leaving it renames, Esc cancels
+        if (msg == WM_KEYDOWN && (wp == VK_RETURN || wp == VK_ESCAPE)) {
+            if (wp == VK_ESCAPE) w->rename_target.clear();
+            SetFocus(w->hwnd); // WM_KILLFOCUS does the rest
+            return 0;
+        }
+        if (msg == WM_KILLFOCUS) {
+            int n = GetWindowTextLengthW(h);
+            std::wstring name(n, 0);
+            GetWindowTextW(h, &name[0], n + 1);
+            std::wstring target = w->rename_target;
+            w->rename_target.clear();
+            ShowWindow(h, SW_HIDE);
+            if (!target.empty() && !name.empty() && name != PathFindFileNameW(target.c_str())) {
+                cur_view(w).select_after = name;
+                shell_rename(w->hwnd, target, name);
+            }
+        }
+    }
     if (msg == WM_KEYDOWN) {
         if (wp == VK_RETURN && id == 1) { // the address: go there
             int n = GetWindowTextLengthW(h);
@@ -515,6 +562,7 @@ void edit_fonts(Win *w) {
                                CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
     if (w->edit) SendMessageW(w->edit, WM_SETFONT, (WPARAM)w->edit_font, TRUE);
     if (w->search) SendMessageW(w->search, WM_SETFONT, (WPARAM)w->edit_font, TRUE);
+    if (w->rename) SendMessageW(w->rename, WM_SETFONT, (WPARAM)w->edit_font, TRUE);
 }
 
 D2D1_RECT_F address_rect(Win *w) {
@@ -533,6 +581,41 @@ void edit_address(Win *w) {
     SetWindowPos(w->edit, HWND_TOP, x, y, (int)std::lround((r.right - 8) * s) - x, (int)std::lround((r.bottom - 5) * s) - y, SWP_SHOWWINDOW);
     SetFocus(w->edit);
     SendMessageW(w->edit, EM_SETSEL, 0, -1);
+}
+
+// F2: the focused item's name becomes an edit box over its row (the extension left out of the selection)
+void start_rename(Win *w) {
+    View &v = cur_view(w);
+    if (v.kind != TAB_FILES || v.path.empty() || v.focus < 0 || !w->rename) return;
+    const Item &it = v.all[v.shown[v.focus]];
+    ensure_visible(w, v, v.focus);
+    float s = scale(w);
+    D2D1_RECT_F l = list_rect(w);
+    float y = l.top + v.focus * kRowH - v.scroll, x0 = l.left + 8 + 26;
+    int x = (int)std::lround(x0 * s), top = (int)std::lround((y + 3) * s);
+    SetWindowPos(w->rename, HWND_TOP, x, top, (int)std::lround((x0 + name_width(w) - 30) * s) - x, (int)std::lround((y + kRowH - 3) * s) - top,
+                 SWP_SHOWWINDOW);
+    w->rename_target = it.target;
+    SetWindowTextW(w->rename, it.name.c_str());
+    SetFocus(w->rename);
+    size_t dot = it.dir ? std::wstring::npos : it.name.rfind(L'.');
+    SendMessageW(w->rename, EM_SETSEL, 0, dot == std::wstring::npos || dot == 0 ? -1 : (LPARAM)dot);
+    redraw(w);
+}
+
+std::vector<std::wstring> selected_targets(View &v) {
+    std::vector<std::wstring> out;
+    for (int i : selected(v)) out.push_back(v.all[i].target);
+    return out;
+}
+
+void new_folder(Win *w) {
+    View &v = cur_view(w);
+    std::wstring name = shell_new_folder(v.path, T(L"New folder"));
+    if (name.empty()) return;
+    v.select_after = name;
+    v.rename_after = true;
+    load(w, v);
 }
 
 // --- painting ----------------------------------------------------------------------------------------------
@@ -691,6 +774,10 @@ void draw_list(Win *w, D2D1_RECT_F c) {
         bool sel = v.sel[v.shown[p]] != 0, hot = hovered(w, H_ROW, p);
         if (sel) fill_round(w, row, 4, kSelect, GetFocus() == w->hwnd ? 1 : 0.6f);
         else if (hot) fill_round(w, row, 4, kHover);
+        if (p == w->drop_row) {
+            w->br->SetColor(color(kAccent));
+            w->dc->DrawRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(row.left + 1, row.top + 1, row.right - 1, row.bottom - 1), 4, 4), w->br, 2);
+        }
         if (p == v.focus && GetFocus() == w->hwnd && !sel) {
             w->br->SetColor(color(kDim, 0.6f));
             w->dc->DrawRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(row.left + 0.5f, row.top + 0.5f, row.right - 0.5f, row.bottom - 0.5f), 4, 4), w->br, 1);
@@ -707,6 +794,20 @@ void draw_list(Win *w, D2D1_RECT_F c) {
         }
     }
     w->dc->PopAxisAlignedClip();
+    if (g_shot && IsWindowVisible(w->rename)) { // the rename box is a child window: not in the bitmap otherwise
+        RECT r;
+        GetWindowRect(w->rename, &r);
+        MapWindowPoints(NULL, w->hwnd, (POINT *)&r, 2);
+        float s = scale(w);
+        D2D1_RECT_F b = D2D1::RectF(r.left / s, r.top / s, r.right / s, r.bottom / s);
+        fill(w, b, kBg);
+        w->br->SetColor(color(kAccent));
+        w->dc->DrawRectangle(b, w->br, 1);
+        int n = GetWindowTextLengthW(w->rename);
+        std::wstring t(n, 0);
+        GetWindowTextW(w->rename, &t[0], n + 1);
+        text(w, t, D2D1::RectF(b.left + 4, b.top, b.right - 2, b.bottom), w->f_ui, kText);
+    }
 
     // scrollbar
     float h = l.bottom - l.top, total = content_h(v);
@@ -838,6 +939,17 @@ int row_at(Win *w, float y) {
 }
 
 void on_move(Win *w, float x, float y) {
+    if (w->drag_maybe && GetKeyState(VK_LBUTTON) < 0) {
+        POINT pt;
+        GetCursorPos(&pt);
+        if (abs(pt.x - w->drag_from.x) > GetSystemMetrics(SM_CXDRAG) || abs(pt.y - w->drag_from.y) > GetSystemMetrics(SM_CYDRAG)) {
+            w->drag_maybe = false;
+            w->collapse_to = -1;
+            w->press = H_NONE;
+            shell_drag(w->hwnd, selected_targets(cur_view(w))); // modal until dropped
+            return;
+        }
+    }
     if (w->drag_scroll) {
         View &v = cur_view(w);
         D2D1_RECT_F l = list_rect(w);
@@ -908,7 +1020,13 @@ void on_down(Win *w, float x, float y, bool dbl, bool right) {
         else if (ctrl && !right) {
             v.sel[v.shown[p]] ^= 1;
             v.focus = v.anchor = p;
-        } else if (!(right && v.sel[v.shown[p]])) select_only(v, p);
+        } else if (v.sel[v.shown[p]] && selected(v).size() > 1) {
+            if (!right) w->collapse_to = p; // on release, if it was not a drag
+        } else select_only(v, p);
+        if (!right && v.sel[v.shown[p]]) {
+            w->drag_maybe = true;
+            GetCursorPos(&w->drag_from);
+        }
         break;
     }
     }
@@ -916,6 +1034,11 @@ void on_down(Win *w, float x, float y, bool dbl, bool right) {
 }
 
 void on_up(Win *w, float x, float y, bool middle) {
+    if (!middle) {
+        w->drag_maybe = false;
+        if (w->collapse_to >= 0 && cur_view(w).kind == TAB_FILES && row_at(w, y) == w->collapse_to) select_only(cur_view(w), w->collapse_to);
+        w->collapse_to = -1;
+    }
     if (w->drag_scroll) {
         w->drag_scroll = false;
         ReleaseCapture();
@@ -1008,6 +1131,7 @@ bool on_key(Win *w, WPARAM key) {
     int page = std::max(1, (int)((l.bottom - l.top) / kRowH) - 1);
     if (ctrl && key == 'T') return new_tab(w, v.kind == TAB_FILES ? v.path : L""), true;
     if (ctrl && key == 'W') return close_tab(w, w->cur), true;
+    if (ctrl && shift && key == 'N' && v.kind == TAB_FILES) return new_folder(w), true;
     if (ctrl && key == 'N') {
         WindowSpec s;
         s.path = v.path;
@@ -1034,6 +1158,19 @@ bool on_key(Win *w, WPARAM key) {
     if (ctrl && key == 'A') {
         for (int i : v.shown) v.sel[i] = 1;
         redraw(w);
+        return true;
+    }
+    // what Windows' shell does with the selection (Home's entries are places, not files to delete or rename)
+    bool in_folder = !v.path.empty();
+    if (key == VK_DELETE && in_folder) return shell_delete(w->hwnd, selected_targets(v), shift, conf_get("confirm_delete") != "0"), true;
+    if (key == VK_F2 && in_folder) return start_rename(w), true;
+    if (ctrl && key == 'C') return shell_clipboard(w->hwnd, selected_targets(v), false), true;
+    if (ctrl && key == 'X' && in_folder) return shell_clipboard(w->hwnd, selected_targets(v), true), true;
+    if (ctrl && key == 'V' && in_folder) return shell_paste(w->hwnd, v.path), true;
+    if (alt && key == VK_RETURN) {
+        std::vector<std::wstring> t = selected_targets(v);
+        if (!t.empty()) shell_properties(w->hwnd, t[0]);
+        else if (in_folder) shell_properties(w->hwnd, v.path);
         return true;
     }
     switch (key) {
@@ -1089,6 +1226,67 @@ void on_char(Win *w, wchar_t ch) {
     }
 }
 
+// the shell's context menu: of the selection on a row, of the folder elsewhere in the list; lp -1 = from the keyboard
+bool context_menu(Win *w, LPARAM lp) {
+    View &v = cur_view(w);
+    if (v.kind != TAB_FILES) return false;
+    float s = scale(w);
+    D2D1_RECT_F l = list_rect(w);
+    POINT pt = { GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+    std::vector<std::wstring> items;
+    if (lp == -1) {
+        items = selected_targets(v);
+        float y = v.focus >= 0 ? l.top + (v.focus + 1) * kRowH - v.scroll : l.top + 10;
+        pt = { (LONG)((l.left + 40) * s), (LONG)(y * s) };
+        ClientToScreen(w->hwnd, &pt);
+    } else {
+        POINT c = pt;
+        ScreenToClient(w->hwnd, &c);
+        if (!inside(l, c.x / s, c.y / s)) return false;
+        if (row_at(w, c.y / s) >= 0) items = selected_targets(v);
+    }
+    if (shell_menu(w->hwnd, v.path, items, pt) == "rename") start_rename(w);
+    return true;
+}
+
+// dropping on the window: on a folder row, into it; on a place in the navigation pane, there; else the folder shown
+struct WinDrop final : DropHandler {
+    Win *w;
+    explicit WinDrop(Win *win) : w(win) {}
+    std::wstring drop_folder(POINT screen) override {
+        View &v = cur_view(w);
+        if (v.kind != TAB_FILES) return L"";
+        POINT c = screen;
+        ScreenToClient(w->hwnd, &c);
+        float x = c.x / scale(w), y = c.y / scale(w);
+        const Region *r = hit(w, x, y);
+        if (r && r->id == H_NAV) {
+            size_t n = w->places.size(), i = (size_t)r->arg;
+            return i < n ? w->places[i].path : i - n < w->drives.size() ? w->drives[i - n].path : L"";
+        }
+        if (inside(list_rect(w), x, y)) {
+            int p = row_at(w, y);
+            if (p >= 0 && v.all[v.shown[p]].dir) return v.all[v.shown[p]].target;
+        }
+        return v.path;
+    }
+    void drop_hover(POINT screen, bool in) override {
+        int row = -1;
+        View &v = cur_view(w);
+        if (in && v.kind == TAB_FILES) {
+            POINT c = screen;
+            ScreenToClient(w->hwnd, &c);
+            float x = c.x / scale(w), y = c.y / scale(w);
+            int p = inside(list_rect(w), x, y) ? row_at(w, y) : -1;
+            if (p >= 0 && v.all[v.shown[p]].dir) row = p;
+        }
+        if (row != w->drop_row) {
+            w->drop_row = row;
+            redraw(w);
+        }
+    }
+};
+
 // --- the window ----------------------------------------------------------------------------------------------
 
 void save_place(Win *w) {
@@ -1112,6 +1310,17 @@ LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     }
     float s = scale(w);
     switch (msg) {
+    case WM_INITMENUPOPUP:
+    case WM_DRAWITEM:
+    case WM_MEASUREITEM:
+    case WM_MENUCHAR: {
+        LRESULT res = 0;
+        if (shell_menu_message(msg, wp, lp, &res)) return res; // a shell extension's submenu
+        break;
+    }
+    case WM_CONTEXTMENU:
+        if (context_menu(w, lp)) return 0;
+        break;
     case WM_CREATE: {
         BOOL dark = TRUE;
         DwmSetWindowAttribute(h, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, &dark, sizeof(dark));
@@ -1121,8 +1330,12 @@ LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         w->edit = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | ES_AUTOHSCROLL, 0, 0, 0, 0, h, (HMENU)1, g_inst, NULL);
         w->search = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | ES_AUTOHSCROLL, 0, 0, 0, 0, h, (HMENU)2, g_inst, NULL);
         SetWindowSubclass(w->edit, edit_proc, 1, (DWORD_PTR)w);
+        w->rename = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_BORDER | ES_AUTOHSCROLL, 0, 0, 0, 0, h, (HMENU)3, g_inst, NULL);
         SetWindowSubclass(w->search, edit_proc, 2, (DWORD_PTR)w);
+        SetWindowSubclass(w->rename, edit_proc, 3, (DWORD_PTR)w);
         edit_fonts(w);
+        w->drop = new WinDrop(w);
+        shell_register_drop(h, w->drop);
         w->places = folder_places();
         w->drives = folder_drives();
         return 0;
@@ -1157,6 +1370,7 @@ LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             place_edits(w);
         }
         if (IsWindowVisible(w->edit)) ShowWindow(w->edit, SW_HIDE);
+        if (IsWindowVisible(w->rename)) SetFocus(h); // the row moves: renamed with what was typed
         redraw(w);
         return 0;
     case WM_DPICHANGED: {
@@ -1198,6 +1412,7 @@ LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         else go_forward(w);
         return TRUE;
     case WM_MOUSEWHEEL: {
+        if (IsWindowVisible(w->rename)) SetFocus(h);
         View &v = cur_view(w);
         if (v.kind == TAB_TASKS) tasks_wheel(v.tasks, GET_WHEEL_DELTA_WPARAM(wp));
         else {
@@ -1222,6 +1437,22 @@ LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         break;
     case WM_DEVICECHANGE: w->drives = folder_drives(); redraw(w); return TRUE;
     case WM_APP_LIST: on_listing(w, (Listing *)lp); return 0;
+    case WM_APP_CHANGED: {
+        PIDLIST_ABSOLUTE *pidls = nullptr;
+        LONG ev = 0;
+        if (HANDLE lock = SHChangeNotification_Lock((HANDLE)wp, (DWORD)lp, &pidls, &ev)) SHChangeNotification_Unlock(lock);
+        SetTimer(h, 7, 150, NULL); // a burst of changes (a copy of 1000 files): one refresh
+        return 0;
+    }
+    case WM_TIMER:
+        if (wp == 7) {
+            View &v = cur_view(w);
+            if (IsWindowVisible(w->rename)) return 0; // after the rename
+            KillTimer(h, 7);
+            if (v.kind == TAB_FILES && !v.path.empty()) load(w, v);
+            return 0;
+        }
+        break;
     case WM_APP_ICONS: {
         auto *ic = (Icons *)lp;
         for (View &v : w->views) {
@@ -1245,6 +1476,9 @@ LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_CLOSE: DestroyWindow(h); return 0;
     case WM_DESTROY:
         save_place(w);
+        shell_revoke_drop(h);
+        shell_unwatch(w->watch);
+        w->watch = 0;
         return 0;
     case WM_NCDESTROY: {
         for (View &v : w->views) {
@@ -1252,6 +1486,7 @@ LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             if (v.gen) folder_forget(v.gen);
         }
         w->views.clear();
+        delete static_cast<WinDrop *>(w->drop);
         drop_target(w);
         release(w->f_ui), release(w->f_ui_c), release(w->f_small), release(w->f_icon), release(w->f_icon_s), release(w->f_title);
         if (w->edit_font) DeleteObject(w->edit_font);
@@ -1455,6 +1690,17 @@ void window_command(const std::wstring &verb, const std::wstring &arg) {
         for (int p = 0; p < (int)v.shown.size(); p++)
             if (!_wcsicmp(v.all[v.shown[p]].name.c_str(), arg.c_str())) move_focus(w, p, false, false);
     } else if (verb == L"newtab") new_tab(w, folder_normalize(arg));
+    else if (verb == L"newfolder") new_folder(w);
+    else if (verb == L"rename") { // the focused item renamed to arg, as typed in the box
+        start_rename(w);
+        if (IsWindowVisible(w->rename)) {
+            SetWindowTextW(w->rename, arg.c_str());
+            SendMessageW(w->rename, WM_KILLFOCUS, 0, 0); // as leaving the box: renames
+            SetFocus(w->hwnd);
+        }
+    } else if (verb == L"copyto" || verb == L"moveto") // the clipboard is the user's: tests copy without it
+        shell_copy_to(w->hwnd, selected_targets(v), folder_normalize(arg), verb == L"moveto");
+    else if (verb == L"delete") shell_delete(w->hwnd, selected_targets(v), arg == L"permanent", conf_get("confirm_delete") != "0");
     else if (verb == L"tasks") new_tab(w, L"", TAB_TASKS);
     else if (verb == L"taskpage") {
         // the page buttons sit in the toolbar: click the n-th one where tasks_toolbar put it

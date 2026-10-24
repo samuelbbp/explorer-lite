@@ -12,6 +12,9 @@
 #   sleep <ms>
 #   mem <label>        the resident's working set and private bytes, into results.json
 #   stop               ends the resident (and what it started)
+#   make <dir>         a folder with file1.txt..file3.txt (a sandbox for file operations)
+#   exists <path> / missing <path>   checks, failures go to errors
+# {dir} in a step is this test's folder.
 param([string]$Dir = $PSScriptRoot, [string]$Steps = "$PSScriptRoot\steps.txt")
 $ErrorActionPreference = 'Stop'
 $out = Join-Path $Dir 'out'
@@ -61,7 +64,7 @@ function Send([string]$a) { [void][TestDesk]::Run($exe, "--instance test $a", $d
 function Mine { @(Get-CimInstance Win32_Process -Filter "Name='explorer-lite.exe'" | Where-Object { $_.ExecutablePath -eq $exe }) }
 try {
     foreach ($line in Get-Content -Encoding UTF8 $Steps) {
-        $line = $line.Trim()
+        $line = $line.Trim().Replace('{dir}', $Dir)
         if (-not $line -or $line.StartsWith('#')) { continue }
         $verb, $rest = $line -split ' ', 2
         switch ($verb) {
@@ -93,6 +96,12 @@ try {
                 Start-Sleep -Milliseconds 500
                 foreach ($p in Mine) { & taskkill.exe /PID $p.ProcessId /T /F 2>&1 | Out-Null }
             }
+            'make' {
+                New-Item -ItemType Directory -Force $rest | Out-Null
+                1..3 | ForEach-Object { Set-Content -Encoding UTF8 (Join-Path $rest "file$_.txt") "explorer-lite test $_" }
+            }
+            'exists' { if (-not (Test-Path -LiteralPath $rest)) { $results.errors += "missing: $rest" } }
+            'missing' { if (Test-Path -LiteralPath $rest) { $results.errors += "still there: $rest" } }
             default { $results.errors += "unknown step: $line" }
         }
     }

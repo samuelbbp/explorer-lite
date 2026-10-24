@@ -1,0 +1,38 @@
+# File operations in a sandbox: new folder + rename, copy, delete; the list follows by itself
+# (change notifications, no refresh asked).
+conf language=en
+conf confirm_delete=0
+make {dir}\sandbox
+start --tray
+sleep 2000
+send
+sleep 2000
+cmd size 1180x720
+cmd go {dir}\sandbox
+sleep 1500
+shot ops-start
+cmd newfolder
+sleep 1500
+shot ops-newfolder
+cmd rename Projects
+sleep 2000
+exists {dir}\sandbox\Projects
+shot ops-renamed
+cmd select file1.txt
+cmd copyto {dir}\sandbox\Projects
+sleep 1500
+cmd go {dir}\sandbox\Projects
+sleep 1500
+exists {dir}\sandbox\Projects\file1.txt
+shot ops-copied
+cmd go {dir}\sandbox
+sleep 1500
+cmd select file2.txt
+cmd delete permanent
+sleep 2500
+missing {dir}\sandbox\file2.txt
+shot ops-deleted
+mem after-ops
+cmd closeall
+sleep 1000
+stop

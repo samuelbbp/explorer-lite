@@ -13,6 +13,7 @@ enum {
     WM_APP_LIST,              // a folder listing finished on its thread (window.cpp)
     WM_APP_TASKS,             // a new task manager sample (tasks.cpp)
     WM_APP_ICONS,             // icons of programs and shortcuts in a folder just listed (folder.cpp)
+    WM_APP_CHANGED,           // something changed in the folder a window shows (SHChangeNotifyRegister)
 };
 
 enum Tab { TAB_FILES, TAB_TASKS };
