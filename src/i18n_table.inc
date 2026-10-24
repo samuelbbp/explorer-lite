@@ -88,6 +88,7 @@ static const Pair k_es[] = {
     { L"{0} items", L"{0} elementos" },
     { L"{0} processes   CPU {1}   Memory {2} of {3}", L"{0} procesos   CPU {1}   Memoria {2} de {3}" },
     { L"{0} selected", L"{0} seleccionados" },
+    { L"{0} shared", L"{0} compartida" },
 };
 static const Table kTables[] = {
     { "es", k_es, sizeof(k_es) / sizeof(k_es[0]) },

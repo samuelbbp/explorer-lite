@@ -868,9 +868,13 @@ void tasks_draw(TasksView *t, ID2D1RenderTarget *rt, ID2D1SolidColorBrush *br, I
                        kDim);
             if (s.pid) {
                 text_right(rt, br, std::to_wstring(s.pid), D2D1::RectF(x_cpu, y, x_mem - 6, y + kRow), f, kDim);
+                // a host shared with other services (svchost): its memory is theirs too, said so and dimmed
+                int sharing = 0;
+                for (const Service &o : t->services) sharing += o.pid == s.pid ? 1 : 0;
                 for (const Proc &p : t->cur.procs)
                     if (p.pid == s.pid) {
-                        text_right(rt, br, mem_text(p.priv), D2D1::RectF(x_mem, y, right - 6, y + kRow), f, kText);
+                        std::wstring m = sharing > 1 ? Tf(L"{0} shared", { mem_text(p.priv) }) : mem_text(p.priv);
+                        text_right(rt, br, m, D2D1::RectF(x_mem, y, right - 6, y + kRow), f, sharing > 1 ? kDim : kText);
                         break;
                     }
             }

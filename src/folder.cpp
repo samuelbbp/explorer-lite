@@ -235,19 +235,22 @@ void folder_search_items(const COPYDATASTRUCT *cds, std::vector<Item> &items) {
     const DWORD *head = (const DWORD *)base;
     DWORD n = head[1], req = head[3];
     const DWORD *entries = head + 5;
-    if ((const BYTE *)(entries + 2 * (size_t)n) > end) return;
+    // what comes from another process is checked as sizes, never as pointer sums that could wrap
+    if (n > (cds->cbData - 20) / 8) return;
     items.reserve(n);
     for (DWORD i = 0; i < n; i++) {
+        if (entries[2 * i + 1] >= cds->cbData) break;
         const BYTE *p = base + entries[2 * i + 1];
         Item it;
         it.dir = (entries[2 * i] & kFolder) != 0;
         std::wstring name, dir;
         // the fields come in the order of their request bits; text is a length then the characters and a null
         auto text = [&](std::wstring &out) {
-            if (p + 4 > end) return false;
-            DWORD len = *(const DWORD *)p;
+            if ((size_t)(end - p) < 4) return false;
+            DWORD len;
+            memcpy(&len, p, 4);
             p += 4;
-            if (p + (len + 1) * sizeof(wchar_t) > end) return false;
+            if ((uint64_t)(end - p) < ((uint64_t)len + 1) * sizeof(wchar_t)) return false;
             out.assign((const wchar_t *)p, len);
             p += (len + 1) * sizeof(wchar_t);
             return true;
@@ -255,12 +258,12 @@ void folder_search_items(const COPYDATASTRUCT *cds, std::vector<Item> &items) {
         if ((req & kReqName) && !text(name)) break;
         if ((req & kReqPath) && !text(dir)) break;
         if (req & kReqSize) {
-            if (p + 8 > end) break;
-            it.bytes = *(const uint64_t *)p;
+            if ((size_t)(end - p) < 8) break;
+            memcpy(&it.bytes, p, 8);
             p += 8;
         }
         if (req & kReqModified) {
-            if (p + 8 > end) break;
+            if ((size_t)(end - p) < 8) break;
             memcpy(&it.mtime, p, 8);
             p += 8;
         }
