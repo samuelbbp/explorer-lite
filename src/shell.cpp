@@ -1317,6 +1317,21 @@ void shell_relaunch_after_update() {
     shell_launch(exe_path(), L"--shell");
 }
 
+// Winlogon keeps the sign-in screen (and, on a user's first sign-in, the "Hi" animation) up until the shell says it is
+// ready, as explorer does through these events; without them it waits ~30 s and the first sign-in can stay covered.
+// The same as Cairo/ManagedShell do.
+static void signal_shell_ready() {
+    const wchar_t *names[] = { L"Global\\msgina: ShellReadyEvent", L"msgina: ShellReadyEvent", L"ShellDesktopSwitchEvent", L"Global\\ShellDesktopSwitchEvent" };
+    int set = 0;
+    for (const wchar_t *n : names) {
+        HANDLE e = OpenEventW(EVENT_MODIFY_STATE, FALSE, n);
+        if (!e) continue;
+        if (SetEvent(e)) set++;
+        CloseHandle(e);
+    }
+    log_line("shell: told Winlogon the shell is ready (" + std::to_string(set) + " events)");
+}
+
 int shell_main(const std::wstring &cmd, bool quit_it, DWORD restarted) {
     if (restarted) { // the crashed one may not be gone yet: its mutex with it
         HANDLE old = OpenProcess(SYNCHRONIZE, FALSE, restarted);
@@ -1389,6 +1404,7 @@ int shell_main(const std::wstring &cmd, bool quit_it, DWORD restarted) {
 
     load_pins();
     bars_create();
+    if (g_mode == M_SHELL) signal_shell_ready();
     hooks_start();
     scan();
     HWND f = GetForegroundWindow();
