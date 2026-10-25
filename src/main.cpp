@@ -3,7 +3,8 @@
 // demand (window.cpp); with none open it holds no Direct2D at all.
 //
 //   explorer-lite.exe [folder]         opens a window (starting the resident if it is not running)
-//   explorer-lite.exe --tasks          opens a window on the Tasks tab
+//   explorer-lite.exe --tasks          opens a window on the Tasks tab (the one open, if there is one)
+//   explorer-lite.exe --taskbar-settings   opens the taskbar's settings (taskbarset.cpp)
 //   explorer-lite.exe --tray           only the resident (Windows startup)
 //   explorer-lite.exe --quit           asks the running one to save its windows and exit (installer); exit code 10 if
 //                                      there was one, 0 if not
@@ -30,6 +31,7 @@
 #include "idioma.h"
 #include "keys.h"
 #include "shell.h"
+#include "taskbar.h"
 #include "update.h"
 
 HINSTANCE g_inst;
@@ -52,7 +54,8 @@ std::wstring run_value() { return L"explorer-lite" + instance_suffix(); }
 // --- the command line ---------------------------------------------------------------------------
 
 struct Command {
-    bool tray = false, tasks = false, quit = false, updated = false, unregister = false, everything = false, shell = false, apps = false;
+    bool tray = false, tasks = false, quit = false, updated = false, unregister = false, everything = false, shell = false, apps = false,
+         taskbar = false;
     DWORD restarted = 0; // --restarted <pid>: the shell that crashed (shell.cpp)
     std::wstring path, cmd, text;
 };
@@ -63,6 +66,7 @@ Command parse(int argc, wchar_t **argv) {
         std::wstring a = argv[i];
         if (a == L"--tray") c.tray = true;
         else if (a == L"--tasks") c.tasks = true;
+        else if (a == L"--taskbar-settings") c.taskbar = true;
         else if (a == L"--quit") c.quit = true;
         else if (a == L"--updated") c.updated = true;
         else if (a == L"--unregister") c.unregister = true;
@@ -81,10 +85,11 @@ Command parse(int argc, wchar_t **argv) {
     return c;
 }
 
-// tab-separated, as it travels in WM_COPYDATA: "open", "tasks", "quit", "tray" or "cmd", and the path (or the command)
+// tab-separated, as it travels in WM_COPYDATA: "open", "tasks", "taskbar", "quit", "tray" or "cmd", and the path (or
+// the command)
 std::wstring serialize(const Command &c) {
     if (!c.cmd.empty()) return L"cmd\t" + c.cmd;
-    std::wstring s = c.quit ? L"quit" : c.tasks ? L"tasks" : c.tray ? L"tray" : L"open";
+    std::wstring s = c.quit ? L"quit" : c.tasks ? L"tasks" : c.taskbar ? L"taskbar" : c.tray ? L"tray" : L"open";
     return s + L"\t" + c.path;
 }
 
@@ -94,14 +99,20 @@ void run(const Command &c) {
         std::wstring verb = c.cmd.substr(0, sp), arg = sp == std::wstring::npos ? L"" : c.cmd.substr(sp + 1);
         if (verb == L"shot") log_line(std::string("shot ") + (window_shot(arg) ? "ok" : "failed"));
         else if (verb == L"closeall") window_close_all();
-        else window_command(verb, arg);
+        else if (taskbar_settings_command(verb, arg)) {
+        } else window_command(verb, arg);
         return;
     }
     if (c.quit) {
         app_quit();
         return;
     }
+    if (c.taskbar) {
+        taskbar_settings_open();
+        return;
+    }
     if (c.tray) return;
+    if (c.tasks && window_focus_tasks()) return; // the task manager open somewhere: that one, as Ctrl+Shift+Esc
     WindowSpec s;
     s.path = c.path;
     s.tab = c.tasks ? TAB_TASKS : TAB_FILES;
@@ -368,6 +379,7 @@ void tray_menu() {
         if (theme_apply()) {
             theme_menus();
             window_update_changed();
+            taskbar_settings_theme();
         }
         break;
     }
@@ -375,6 +387,7 @@ void tray_menu() {
         if (cmd >= TC_LANG && (int)cmd < TC_LANG + nl) {
             set_ui_lang(ls[cmd - TC_LANG].code);
             window_update_changed();
+            taskbar_settings_theme(); // repainted in the new language
         }
     }
 }
@@ -438,6 +451,7 @@ LRESULT CALLBACK host_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         if (verb == L"cmd") c.cmd = c.path, c.path.clear();
         c.quit = verb == L"quit";
         c.tasks = verb == L"tasks";
+        c.taskbar = verb == L"taskbar";
         c.tray = verb == L"tray";
         // after returning: the sender is waiting in SendMessage, and quitting or opening takes a while
         auto *later = new Command(c);
@@ -454,6 +468,7 @@ LRESULT CALLBACK host_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         if (lp && !wcscmp((const wchar_t *)lp, L"ImmersiveColorSet") && theme_apply()) {
             theme_menus();
             window_update_changed();
+            taskbar_settings_theme();
         }
         return 0;
     case WM_QUERYENDSESSION: return TRUE;
@@ -550,6 +565,24 @@ int everything_probe(const Command &c) {
     return (int)m.wParam;
 }
 
+// A shell started from the machine-wide copy (Program Files: an OS image puts it there for every user) hands over to
+// this user's own install when there is one: that copy is the one the updater keeps current
+bool shell_handoff() {
+    if (!shell_real()) return false;
+    wchar_t self[MAX_PATH], mine[MAX_PATH];
+    GetModuleFileNameW(NULL, self, MAX_PATH);
+    ExpandEnvironmentStringsW(L"%LOCALAPPDATA%\\Programs\\explorer-lite\\explorer-lite.exe", mine, MAX_PATH);
+    if (_wcsicmp(self, mine) == 0 || GetFileAttributesW(mine) == INVALID_FILE_ATTRIBUTES) return false;
+    std::wstring line = L"\"" + std::wstring(mine) + L"\" --shell";
+    STARTUPINFOW si = { sizeof(si) };
+    PROCESS_INFORMATION pi = {};
+    if (!CreateProcessW(mine, line.data(), NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) return false;
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    log_line("shell: handed over to this user's own install");
+    return true;
+}
+
 } // namespace
 
 // The running process whose hidden window is of class `cls` gets `line` (WM_COPYDATA). For a quit, waits until it
@@ -589,6 +622,7 @@ void app_install_update() {
     // the installer reopens us with --updated (it was launched from data_dir()\tmp)
     g_quitting = true;
     window_close_all();
+    taskbar_settings_close();
     tray_remove();
     DestroyWindow(g_host);
     PostQuitMessage(0);
@@ -599,6 +633,7 @@ void app_quit() {
     g_quitting = true;
     save_session(); // the installer asks with --quit, and reopens with --updated
     window_close_all();
+    taskbar_settings_close();
     tray_remove();
     DestroyWindow(g_host);
     PostQuitMessage(0);
@@ -621,6 +656,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
         return 0;
     }
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    if (cmd.shell && cmd.cmd.empty() && !cmd.quit && !cmd.restarted && shell_handoff()) return 0;
     if (cmd.shell) return shell_main(cmd.cmd, cmd.quit, cmd.restarted);
     // the installer's --quit: the shell goes too (and comes back with --updated), so nothing keeps the exe in use
     int shell_quit = cmd.quit ? shell_quit_running() : 0;

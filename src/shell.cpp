@@ -4,7 +4,9 @@
 // windows leave room; as the session's shell nobody answers that, so it sets each monitor's work area itself, as
 // ManagedShell does (AppBarManager.SetWorkArea), less what other programs' appbars take (tray.cpp answers them). Then
 // it also runs what starts with Windows, once per sign-in, owns the notification area (tray.cpp) and takes the Win key's
-// shortcuts and Alt+Tab (keys.cpp, switcher.cpp).
+// shortcuts and Alt+Tab (keys.cpp, switcher.cpp). How the bars look (left or centered, Start's place and icon, size,
+// titles, seconds...) is the taskbar's settings (taskbar.h), changed in the resident's window and read again here; a
+// right click on a bar's empty space opens its own menu (the Task manager and those settings).
 #include "shell.h"
 #include "app.h"
 #include <dwmapi.h>
@@ -15,6 +17,7 @@
 #include <propsys.h>
 #include <windowsx.h>
 #include <algorithm>
+#include <cmath>
 #include <cwctype>
 #include <vector>
 #include "conf.h"
@@ -22,6 +25,7 @@
 #include "idioma.h"
 #include "keys.h"
 #include "surface.h"
+#include "taskbar.h"
 #include "taskfilter.h"
 #include "tasks.h"
 #include "tray.h"
@@ -30,10 +34,14 @@
 
 namespace {
 
-// layout, in DIPs
-const float kBarH = 40, kStartW = 44, kBtnMax = 200, kBtnMin = 44, kIcon = 20, kClockW = 92, kTitleMin = 96;
-const UINT_PTR kTimerScan = 1, kTimerClock = 2, kTimerStartup = 3, kTimerDisplay = 4, kTimerApps = 5;
-const int kIconPx = 32; // icons asked for at this size, drawn at kIcon DIPs
+// layout, in DIPs; the sizes that the taskbar's size setting changes are Dims
+const float kBtnMax = 200, kTitleMin = 96, kCornerW = 8;
+struct Dims {
+    float bar_h, start_w, btn_min, icon, clock_w;
+};
+const Dims kNormal = { 40, 44, 44, 20, 92 }, kSmall = { 32, 36, 36, 16, 64 };
+const UINT_PTR kTimerScan = 1, kTimerClock = 2, kTimerStartup = 3, kTimerDisplay = 4, kTimerApps = 5, kTimerSeconds = 6;
+const int kIconPx = 32; // icons asked for at this size, drawn at Dims::icon DIPs
 
 enum Mode {
     M_TEST,     // a test instance: bars drawn on its own desktop, no appbar, no work area, no Win key
@@ -55,7 +63,7 @@ struct Pin {
     Thumb *icon = nullptr;
 };
 
-enum BtnKind { B_START, B_TASK, B_PIN, B_CLOCK, B_TRAY };
+enum BtnKind { B_START, B_TASK, B_PIN, B_CLOCK, B_TRAY, B_DESKTOP };
 
 struct Btn {
     D2D1_RECT_F r;
@@ -86,6 +94,11 @@ bool g_quitting;
 ULONGLONG g_started;
 DWORD g_restarted;         // the pid this one replaced after a crash (0: a normal start)
 std::vector<HWND> g_desktop_shown; // Win+D minimized these: the next Win+D brings them back
+TaskbarConf g_conf;        // the taskbar's settings, as last read
+Dims g_dim = kNormal;      // the sizes they ask for
+Thumb *g_start_icon;       // the custom Start icon (null: the logo), at g_start_px pixels for the bars' highest DPI
+std::wstring g_start_path;
+int g_start_px;
 const wchar_t *kBarClass = L"ExplorerLiteTaskbar"; // + instance_suffix(); never explorer's Shell_TrayWnd
 
 std::wstring shell_class() { return L"ExplorerLiteShell" + instance_suffix(); }
@@ -384,14 +397,28 @@ D2D1_RECT_F bar_client(Bar *b) {
     return D2D1::RectF(0, 0, (b->rc.right - b->rc.left) / s, (b->rc.bottom - b->rc.top) / s);
 }
 
+bool has_bar(HMONITOR mon) {
+    for (Bar *b : g_bars)
+        if (b->mon == mon) return true;
+    return false;
+}
+
+// a window's button is on its monitor's bar; on the main one if its monitor has none (the taskbar on one display only)
+bool shows(const Bar *b, const Task &t) { return t.mon == b->mon || (b->primary && !has_bar(t.mon)); }
+
 void layout(Bar *b) {
     b->btns.clear();
     D2D1_RECT_F c = bar_client(b);
-    float x = 4;
-    b->btns.push_back({ D2D1::RectF(x, 2, x + kStartW, c.bottom - 2), B_START, 0 });
-    x += kStartW + 4;
+    float corner = g_conf.corner ? kCornerW : 0;
+    float clock_l = c.right - corner - g_dim.clock_w - 4;
     float tray_w = b->primary ? tray_width() : 0; // the notification area: the main bar's, before the clock
-    float right = c.right - kClockW - 8 - (tray_w ? tray_w + 4 : 0);
+    float left = 4, right = clock_l - 4 - (tray_w ? tray_w + 4 : 0), start_slot = g_dim.start_w + 4;
+    // Start at the far left, or the first of the group that is centered
+    bool start_apart = !g_conf.center || g_conf.start_left;
+    if (start_apart) {
+        b->btns.push_back({ D2D1::RectF(left, 2, left + g_dim.start_w, c.bottom - 2), B_START, 0 });
+        left += start_slot;
+    }
     // what goes on this bar, in order: pinned apps (their windows in their place) on the main one, then the rest
     std::vector<Btn> items;
     std::vector<bool> placed(g_tasks.size(), false);
@@ -399,37 +426,71 @@ void layout(Bar *b) {
         for (int p = 0; p < (int)g_pins.size(); p++) {
             bool any = false;
             for (int i = 0; i < (int)g_tasks.size(); i++)
-                if (g_tasks[i].group == g_pins[p].group && g_tasks[i].mon == b->mon) {
+                if (g_tasks[i].group == g_pins[p].group && shows(b, g_tasks[i])) {
                     items.push_back({ {}, B_TASK, i });
                     placed[i] = any = true;
                 }
             if (!any) items.push_back({ {}, B_PIN, p });
         }
     for (int i = 0; i < (int)g_tasks.size(); i++)
-        if (!placed[i] && g_tasks[i].mon == b->mon) items.push_back({ {}, B_TASK, i });
+        if (!placed[i] && shows(b, g_tasks[i])) items.push_back({ {}, B_TASK, i });
     int n_tasks = 0;
     for (const Btn &it : items) n_tasks += it.kind == B_TASK;
-    float pins_w = (items.size() - n_tasks) * kBtnMin;
-    float w = n_tasks ? std::max(kBtnMin, std::min(kBtnMax, (right - x - pins_w) / n_tasks)) : 0;
-    for (Btn &it : items) {
-        float bw = it.kind == B_TASK ? w : kBtnMin;
-        if (x + bw > right) break; // no room left (an overflow list comes later)
+    float room = right - left - (start_apart ? 0 : start_slot), pins_w = (items.size() - n_tasks) * g_dim.btn_min;
+    // with titles, the windows share the room up to kBtnMax each; without, every button is an icon
+    float w = !n_tasks ? 0 : g_conf.labels ? std::max(g_dim.btn_min, std::min(kBtnMax, (room - pins_w) / n_tasks)) : g_dim.btn_min;
+    float total = start_apart ? 0 : start_slot;
+    size_t fit = 0;
+    for (; fit < items.size(); fit++) {
+        float bw = items[fit].kind == B_TASK ? w : g_dim.btn_min;
+        if (total + bw > right - left) break; // no room left (an overflow list comes later)
+        total += bw;
+    }
+    // centered on the whole bar, as Windows 11 does, but never under Start, the tray or the clock
+    float x = g_conf.center ? std::max(left, std::min(right - total, (c.right - total) / 2)) : left;
+    if (!start_apart) {
+        b->btns.push_back({ D2D1::RectF(x, 2, x + g_dim.start_w, c.bottom - 2), B_START, 0 });
+        x += start_slot;
+    }
+    for (size_t n = 0; n < fit; n++) {
+        Btn it = items[n];
+        float bw = it.kind == B_TASK ? w : g_dim.btn_min;
         it.r = D2D1::RectF(x, 2, x + bw - 2, c.bottom - 2);
         b->btns.push_back(it);
         x += bw;
     }
     if (b->primary && tray_w) {
-        D2D1_RECT_F tr = D2D1::RectF(c.right - kClockW - 4 - tray_w, 0, c.right - kClockW - 4, c.bottom);
+        D2D1_RECT_F tr = D2D1::RectF(clock_l - tray_w, 0, clock_l, c.bottom);
         b->btns.push_back({ tr, B_TRAY, 0 });
         tray_layout(b->s, tr);
-    } else if (b->primary) tray_layout(b->s, D2D1::RectF(c.right - kClockW - 4, 0, c.right - kClockW - 4, c.bottom));
-    b->btns.push_back({ D2D1::RectF(c.right - kClockW - 4, 2, c.right - 4, c.bottom - 2), B_CLOCK, 0 });
+    } else if (b->primary) tray_layout(b->s, D2D1::RectF(clock_l, 0, clock_l, c.bottom));
+    b->btns.push_back({ D2D1::RectF(clock_l, 2, clock_l + g_dim.clock_w, c.bottom - 2), B_CLOCK, 0 });
+    if (corner) b->btns.push_back({ D2D1::RectF(c.right - corner, 0, c.right, c.bottom), B_DESKTOP, 0 });
     if (b->hover >= (int)b->btns.size()) b->hover = -1;
     if (b->press >= (int)b->btns.size()) b->press = -1;
 }
 
 void layout_all() {
     for (Bar *b : g_bars) layout(b);
+}
+
+// The custom Start icon, read again when the file or the size it is needed at changes: pixels for the bars' highest
+// DPI (Direct2D scales it down on the others). A file that cannot be read leaves the logo.
+void start_icon_load() {
+    UINT dpi = 96;
+    for (Bar *b : g_bars) dpi = std::max(dpi, b->s.dpi);
+    int px = (int)std::ceil((g_dim.icon + 2) * dpi / 96.f);
+    if (g_conf.start_icon == g_start_path && px == g_start_px) return;
+    forget_icon(g_start_icon);
+    g_start_path = g_conf.start_icon;
+    g_start_px = px;
+    if (g_start_path.empty()) return;
+    Thumb *t = new Thumb{ kGenBar, g_start_path };
+    if (image_pixels(g_start_path, px, *t)) g_start_icon = t;
+    else {
+        delete t;
+        log_line("shell: the Start icon could not be read: " + utf8(g_start_path));
+    }
 }
 
 std::wstring clock_text(DWORD flags_time, bool date) {
@@ -440,7 +501,13 @@ std::wstring clock_text(DWORD flags_time, bool date) {
 }
 
 void draw_start_logo(Surface &s, D2D1_RECT_F r, bool on) {
-    float cx = (r.left + r.right) / 2, cy = (r.top + r.bottom) / 2, q = 7.5f, gap = 1.5f;
+    float cx = (r.left + r.right) / 2, cy = (r.top + r.bottom) / 2;
+    if (g_start_icon) { // the user's picture, a little bigger than the apps' icons
+        float h = (g_dim.icon + 2) / 2;
+        surf_icon(s, g_start_icon, D2D1::RectF(cx - h, cy - h, cx + h, cy + h), on ? 1 : 0.92f);
+        return;
+    }
+    float q = 7.5f * g_dim.icon / kNormal.icon, gap = 1.5f;
     for (int i = 0; i < 4; i++) {
         float x = cx + (i % 2 ? gap / 2 : -gap / 2 - q), y = cy + (i / 2 ? gap / 2 : -gap / 2 - q);
         surf_round(s, D2D1::RectF(x, y, x + q, y + q), 1.5f, kAccent, on ? 1 : 0.92f);
@@ -463,8 +530,8 @@ void draw_bar(void *ctx) {
             break;
         case B_PIN: {
             if (hov) surf_round(s, bt.r, 4, down ? kPress : kHover);
-            float cx = (bt.r.left + bt.r.right) / 2, cy = (bt.r.top + bt.r.bottom) / 2;
-            surf_icon(s, g_pins[bt.idx].icon, D2D1::RectF(cx - kIcon / 2, cy - kIcon / 2, cx + kIcon / 2, cy + kIcon / 2));
+            float cx = (bt.r.left + bt.r.right) / 2, cy = (bt.r.top + bt.r.bottom) / 2, ic = g_dim.icon;
+            surf_icon(s, g_pins[bt.idx].icon, D2D1::RectF(cx - ic / 2, cy - ic / 2, cx + ic / 2, cy + ic / 2));
             break;
         }
         case B_TASK: {
@@ -472,11 +539,11 @@ void draw_bar(void *ctx) {
             bool active = t.hwnd == g_active && !IsIconic(t.hwnd);
             if (active || hov) surf_round(s, bt.r, 4, down ? kPress : active ? kTabOn : kHover);
             bool wide_btn = bt.r.right - bt.r.left >= kTitleMin;
-            float cy = (bt.r.top + bt.r.bottom) / 2;
-            float ix = wide_btn ? bt.r.left + 10 : (bt.r.left + bt.r.right - kIcon) / 2;
-            surf_icon(s, t.icon, D2D1::RectF(ix, cy - kIcon / 2, ix + kIcon, cy + kIcon / 2), IsIconic(t.hwnd) ? 0.7f : 1);
-            if (!t.icon || t.icon->w <= 0) surf_text(s, L"\xE737", D2D1::RectF(ix, cy - kIcon / 2, ix + kIcon, cy + kIcon / 2), s.f_icon, kDim);
-            if (wide_btn) surf_text(s, t.title, D2D1::RectF(ix + kIcon + 8, bt.r.top, bt.r.right - 8, bt.r.bottom), s.f_ui, kText);
+            float cy = (bt.r.top + bt.r.bottom) / 2, ic = g_dim.icon;
+            float ix = wide_btn ? bt.r.left + 10 : (bt.r.left + bt.r.right - ic) / 2;
+            surf_icon(s, t.icon, D2D1::RectF(ix, cy - ic / 2, ix + ic, cy + ic / 2), IsIconic(t.hwnd) ? 0.7f : 1);
+            if (!t.icon || t.icon->w <= 0) surf_text(s, L"\xE737", D2D1::RectF(ix, cy - ic / 2, ix + ic, cy + ic / 2), s.f_icon, kDim);
+            if (wide_btn) surf_text(s, t.title, D2D1::RectF(ix + ic + 8, bt.r.top, bt.r.right - 8, bt.r.bottom), s.f_ui, kText);
             // the running mark: long and accented for the window in front, short and dim for the others
             float mw = active ? std::min(28.f, (bt.r.right - bt.r.left) * 0.4f) : 6, mx = (bt.r.left + bt.r.right - mw) / 2;
             surf_round(s, D2D1::RectF(mx, bt.r.bottom - 3, mx + mw, bt.r.bottom), 1.5f, active ? kAccent : kDim);
@@ -486,12 +553,29 @@ void draw_bar(void *ctx) {
         case B_CLOCK: {
             if (hov) surf_round(s, bt.r, 4, kHover);
             float mid = (bt.r.top + bt.r.bottom) / 2;
-            surf_text(s, clock_text(TIME_NOSECONDS, false), D2D1::RectF(bt.r.left, bt.r.top + 2, bt.r.right - 8, mid + 1), s.f_small_r, kText);
+            std::wstring time = clock_text(g_conf.seconds ? 0 : TIME_NOSECONDS, false);
+            if (g_conf.small) { // one line: the time alone
+                surf_text(s, time, D2D1::RectF(bt.r.left, bt.r.top, bt.r.right - 8, bt.r.bottom), s.f_small_r, kText);
+                break;
+            }
+            surf_text(s, time, D2D1::RectF(bt.r.left, bt.r.top + 2, bt.r.right - 8, mid + 1), s.f_small_r, kText);
             surf_text(s, clock_text(0, true), D2D1::RectF(bt.r.left, mid - 1, bt.r.right - 8, bt.r.bottom - 2), s.f_small_r, kText);
             break;
         }
+        case B_DESKTOP: // the far corner: a hint of an edge when the pointer is on it, as Windows 11's
+            if (hov) {
+                surf_fill(s, bt.r, down ? kPress : kHover);
+                surf_fill(s, D2D1::RectF(bt.r.left, 8, bt.r.left + 1, c.bottom - 8), kDim);
+            }
+            break;
         }
     }
+}
+
+D2D1_RECT_F start_btn(Bar *b) {
+    for (const Btn &bt : b->btns)
+        if (bt.kind == B_START) return bt.r;
+    return D2D1::RectF(4, 0, 4, 0);
 }
 
 int btn_at(Bar *b, float x, float y) {
@@ -571,10 +655,205 @@ void start_menu_right(Bar *b) {
     }
 }
 
+// --- the taskbar's own menu (a right click on its empty space or the clock) ---------------------------------------
+// Drawn like the tray's overflow, not a Win32 menu: same look in both themes, and a test can take its picture.
+
+enum BarMenuCmd { BM_TASKS = 1, BM_SETTINGS };
+const float kMenuRow = 34, kMenuPad = 4, kMenuMinW = 210;
+
+struct MenuItem {
+    int id;
+    const wchar_t *glyph;
+    std::wstring label;
+};
+
+struct BarMenu {
+    Surface s;
+    std::vector<MenuItem> items;
+    int hover = -1, press = -1, sel = -1; // sel: the keyboard's
+    bool sticky = false, tracking = false;
+};
+
+BarMenu *g_menu;
+std::wstring menu_class() { return L"ExplorerLiteTaskbarMenu" + instance_suffix(); }
+
+D2D1_RECT_F menu_row(BarMenu *m, int i) {
+    RECT rc;
+    GetClientRect(m->s.hwnd, &rc);
+    float y = kMenuPad + i * kMenuRow;
+    return D2D1::RectF(kMenuPad, y, rc.right / surf_scale(m->s) - kMenuPad, y + kMenuRow);
+}
+
+void menu_draw(void *ctx) {
+    BarMenu *m = (BarMenu *)ctx;
+    Surface &s = m->s;
+    RECT rc;
+    GetClientRect(s.hwnd, &rc);
+    float k = surf_scale(s), w = rc.right / k, h = rc.bottom / k;
+    surf_fill(s, D2D1::RectF(0, 0, w, h), kPane);
+    for (int i = 0; i < (int)m->items.size(); i++) {
+        D2D1_RECT_F r = menu_row(m, i);
+        if (i == m->hover || i == m->sel) surf_round(s, r, 4, i == m->press ? kPress : kHover);
+        surf_text(s, m->items[i].glyph, D2D1::RectF(r.left + 8, r.top, r.left + 36, r.bottom), s.f_icon, kText);
+        surf_text(s, m->items[i].label, D2D1::RectF(r.left + 44, r.top, r.right - 12, r.bottom), s.f_ui, kText);
+    }
+    s.br->SetColor(color(kLine));
+    s.dc->DrawRectangle(D2D1::RectF(0.5f, 0.5f, w - 0.5f, h - 0.5f), s.br, 1);
+}
+
+int menu_hit(BarMenu *m, float x, float y) {
+    for (int i = 0; i < (int)m->items.size(); i++)
+        if (surf_inside(menu_row(m, i), x, y)) return i;
+    return -1;
+}
+
+void menu_close() {
+    BarMenu *m = g_menu;
+    if (!m) return;
+    g_menu = nullptr; // first: closing sends messages that must not find it
+    surf_free(m->s);
+    DestroyWindow(m->s.hwnd);
+    delete m;
+}
+
+void menu_choose(int i) {
+    if (!g_menu || i < 0 || i >= (int)g_menu->items.size()) return;
+    int id = g_menu->items[i].id;
+    menu_close();
+    // both are the resident's: the task manager's window if it is open, the settings' window on demand
+    if (id == BM_TASKS) shell_launch(exe_path(), L"--tasks");
+    else if (id == BM_SETTINGS) shell_launch(exe_path(), L"--taskbar-settings");
+}
+
+LRESULT CALLBACK menu_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+    BarMenu *m = g_menu && g_menu->s.hwnd == h ? g_menu : nullptr;
+    if (!m) return DefWindowProcW(h, msg, wp, lp);
+    float k = surf_scale(m->s), x = GET_X_LPARAM(lp) / k, y = GET_Y_LPARAM(lp) / k;
+    switch (msg) {
+    case WM_PAINT: surf_paint(m->s, menu_draw, m); return 0;
+    case WM_ERASEBKGND: return 1;
+    case WM_ACTIVATE:
+        if (LOWORD(wp) == WA_INACTIVE && !m->sticky) PostMessageW(h, WM_CLOSE, 0, 0); // clicked elsewhere
+        return 0;
+    case WM_CLOSE: menu_close(); return 0;
+    case WM_MOUSEMOVE: {
+        int i = menu_hit(m, x, y);
+        if (i != m->hover) {
+            m->hover = i;
+            m->sel = -1;
+            InvalidateRect(h, NULL, FALSE);
+        }
+        if (!m->tracking) {
+            TRACKMOUSEEVENT t = { sizeof(t), TME_LEAVE, h, 0 };
+            m->tracking = TrackMouseEvent(&t) != FALSE;
+        }
+        return 0;
+    }
+    case WM_MOUSELEAVE:
+        m->tracking = false;
+        m->hover = m->press = -1;
+        InvalidateRect(h, NULL, FALSE);
+        return 0;
+    case WM_LBUTTONDOWN:
+    case WM_RBUTTONDOWN:
+        m->press = menu_hit(m, x, y);
+        InvalidateRect(h, NULL, FALSE);
+        return 0;
+    case WM_LBUTTONUP:
+    case WM_RBUTTONUP: {
+        int i = menu_hit(m, x, y);
+        if (i >= 0 && i == m->press) menu_choose(i); // closes it
+        else {
+            m->press = -1;
+            InvalidateRect(h, NULL, FALSE);
+        }
+        return 0;
+    }
+    case WM_KEYDOWN: {
+        int n = (int)m->items.size();
+        switch (wp) {
+        case VK_ESCAPE: menu_close(); return 0;
+        case VK_UP: m->sel = m->sel <= 0 ? n - 1 : m->sel - 1; break;
+        case VK_DOWN: m->sel = (m->sel + 1) % n; break;
+        case VK_RETURN:
+        case VK_SPACE: menu_choose(m->sel); return 0;
+        }
+        m->hover = -1;
+        InvalidateRect(h, NULL, FALSE);
+        return 0;
+    }
+    }
+    return DefWindowProcW(h, msg, wp, lp);
+}
+
+// above `at` (screen pixels: its bottom left corner), inside the monitor; sticky: it stays open without the focus and
+// does not take it (tests on their own desktop)
+void menu_open(POINT at, bool sticky) {
+    menu_close();
+    static bool registered;
+    if (!registered) {
+        WNDCLASSEXW wc = { sizeof(wc) };
+        wc.lpfnWndProc = menu_proc;
+        wc.hInstance = g_inst;
+        wc.hCursor = LoadCursorW(NULL, IDC_ARROW);
+        std::wstring cls = menu_class();
+        wc.lpszClassName = cls.c_str();
+        registered = RegisterClassExW(&wc) != 0;
+    }
+    BarMenu *m = new BarMenu;
+    m->sticky = sticky;
+    m->items = { { BM_TASKS, L"\xE9D9", T(L"Task manager") }, { BM_SETTINGS, L"\xE713", T(L"Taskbar settings") } };
+    g_menu = m;
+    m->s.hwnd = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, menu_class().c_str(), L"Taskbar menu", WS_POPUP, at.x, at.y, 10, 10, NULL, NULL,
+                                g_inst, NULL);
+    if (!m->s.hwnd) {
+        g_menu = nullptr;
+        delete m;
+        return;
+    }
+    m->s.dpi = GetDpiForWindow(m->s.hwnd); // made at `at`: its monitor's
+    DWORD round = 2; // DWMWCP_ROUND
+    DwmSetWindowAttribute(m->s.hwnd, 33 /* DWMWA_WINDOW_CORNER_PREFERENCE */, &round, sizeof(round));
+    surf_formats(m->s);
+    float wd = kMenuMinW;
+    for (const MenuItem &it : m->items) wd = std::max(wd, 44 + surf_text_width(m->s, it.label, m->s.f_ui) + 24 + 2 * kMenuPad);
+    float k = surf_scale(m->s);
+    int w = (int)std::ceil(wd * k), h = (int)std::ceil((2 * kMenuPad + m->items.size() * kMenuRow) * k);
+    MONITORINFO mi = { sizeof(mi) };
+    GetMonitorInfoW(MonitorFromPoint(at, MONITOR_DEFAULTTONEAREST), &mi);
+    int x = std::max((int)mi.rcMonitor.left, std::min((int)mi.rcMonitor.right - w, (int)at.x));
+    int y = std::max((int)mi.rcMonitor.top, (int)at.y - h);
+    SetWindowPos(m->s.hwnd, HWND_TOPMOST, x, y, w, h, SWP_NOACTIVATE);
+    if (sticky) ShowWindow(m->s.hwnd, SW_SHOWNOACTIVATE);
+    else {
+        ShowWindow(m->s.hwnd, SW_SHOW);
+        SetForegroundWindow(m->s.hwnd); // a click on the bar was the last input: allowed; keys come here, a click elsewhere closes it
+    }
+}
+
+void bar_menu(Bar *b) {
+    POINT pt;
+    GetCursorPos(&pt);
+    pt.y = std::min(pt.y, b->rc.top); // its bottom on the bar's top edge, as Windows' own
+    menu_open(pt, false);
+}
+
+void toggle_desktop();
+
 void on_click(Bar *b, int i, int button) { // 0 left, 1 middle, 2 right
-    if (i < 0 || i >= (int)b->btns.size()) return;
+    if (i < 0 || i >= (int)b->btns.size()) {
+        if (i < 0 && button == 2) bar_menu(b); // the bar's empty space
+        return;
+    }
     Btn bt = b->btns[i];
     switch (bt.kind) {
+    case B_CLOCK:
+        if (button == 2) bar_menu(b);
+        break;
+    case B_DESKTOP:
+        if (button == 0) toggle_desktop();
+        else if (button == 2) bar_menu(b);
+        break;
     case B_START:
         if (button == 2) start_menu_right(b);
         else if (button == 0) start_toggle(b->mon);
@@ -607,7 +886,7 @@ void set_work_area(Bar *b) {
 }
 
 void place(Bar *b) {
-    int h = MulDiv((int)kBarH, (int)b->s.dpi, 96);
+    int h = MulDiv((int)g_dim.bar_h, (int)b->s.dpi, 96);
     b->rc = b->mrc;
     b->rc.top = b->rc.bottom - h;
     if (b->appbar) { // explorer says where: above its own taskbar if it is at the bottom too
@@ -660,6 +939,7 @@ LRESULT CALLBACK bar_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_LBUTTONDOWN:
     case WM_MBUTTONDOWN:
     case WM_RBUTTONDOWN:
+        menu_close(); // the bar never takes the focus, so its menu would not see this click as one elsewhere
         if (b->primary && tray_mouse(msg, GET_X_LPARAM(lp) / s, GET_Y_LPARAM(lp) / s)) { // an app's icon: the app is told
             b->press = -1;
             return 0;
@@ -680,6 +960,7 @@ LRESULT CALLBACK bar_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     }
     case WM_DPICHANGED: // its own size, from the monitor (not the rectangle Windows suggests)
         b->s.dpi = HIWORD(wp);
+        start_icon_load();
         place(b);
         return 0;
     case WM_APP_APPBAR:
@@ -692,13 +973,14 @@ LRESULT CALLBACK bar_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
 BOOL CALLBACK add_monitor(HMONITOR mon, HDC, LPRECT, LPARAM) {
     MONITORINFO mi = { sizeof(mi) };
     if (!GetMonitorInfoW(mon, &mi)) return TRUE;
+    if (!g_conf.all_displays && !(mi.dwFlags & MONITORINFOF_PRIMARY)) return TRUE; // the main monitor's bar only
     Bar *b = new Bar;
     b->mon = mon;
     b->mrc = mi.rcMonitor;
     b->primary = (mi.dwFlags & MONITORINFOF_PRIMARY) != 0;
     b->s.dpi = monitor_dpi(mon);
     g_bars.push_back(b);
-    int h = MulDiv((int)kBarH, (int)b->s.dpi, 96);
+    int h = MulDiv((int)g_dim.bar_h, (int)b->s.dpi, 96);
     b->s.hwnd = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE, bar_class().c_str(), L"explorer-lite taskbar", WS_POPUP,
                                 mi.rcMonitor.left, mi.rcMonitor.bottom - h, mi.rcMonitor.right - mi.rcMonitor.left, h, NULL, NULL, g_inst, NULL);
     if (!b->s.hwnd) {
@@ -742,12 +1024,38 @@ void bars_create() {
     // the main monitor's bar first: shots and Start's default monitor
     std::stable_sort(g_bars.begin(), g_bars.end(), [](Bar *a, Bar *b) { return a->primary && !b->primary; });
     check_fullscreen();
+    start_icon_load(); // the bars' DPIs may have changed
+    layout_all();      // every bar is there now: windows of monitors without one go to the main bar
 }
 
-void clock_timer() { // at the next minute, not every second
+void clock_timer() { // at the next minute, not every second (unless the clock shows them: then that too)
     SYSTEMTIME t;
     GetLocalTime(&t);
     SetTimer(g_shell, kTimerClock, (60 - t.wSecond) * 1000 - t.wMilliseconds + 50, NULL);
+    if (g_conf.seconds) SetTimer(g_shell, kTimerSeconds, 1000 - t.wMilliseconds + 20, NULL);
+    else KillTimer(g_shell, kTimerSeconds);
+}
+
+// The taskbar's settings, read (again: the resident saved them): sizes, the bars (one per monitor or the main one
+// only), Start's icon, the clock's timer; then everything laid out and drawn again.
+void settings_apply(bool first) {
+    bool displays = g_conf.all_displays;
+    if (!first) conf_reload();
+    g_conf = taskbar_conf();
+    g_dim = g_conf.small ? kSmall : kNormal;
+    if (g_conf.seconds && g_conf.small) g_dim.clock_w += 16; // the normal clock has room on its date's line
+    if (first) return;
+    if (displays != g_conf.all_displays) {
+        bars_create();
+        scan();
+    } else {
+        for (Bar *b : g_bars) place(b); // its height, the work area, the tray
+        start_icon_load();
+    }
+    clock_timer();
+    layout_all();
+    redraw_all();
+    log_line("shell: taskbar settings applied");
 }
 
 // --- what starts with Windows (only as the session's shell; a test only logs it) -----------------------------------
@@ -961,7 +1269,7 @@ void win_x() {
     m.add(WX_SIGNOUT, L"\xF3B1", T(L"Sign out"));
     m.add(WX_RESTART, L"\xE777", T(L"Restart"));
     m.add(WX_SHUTDOWN, L"\xE7E8", T(L"Shut down"));
-    POINT at = { b->rc.left + MulDiv(4, (int)b->s.dpi, 96), b->rc.top };
+    POINT at = { b->rc.left + (LONG)(start_btn(b).left * surf_scale(b->s)), b->rc.top }; // wherever the button is
     switch (m.show(b->s.hwnd, &at)) {
     case WX_TASKS: shell_launch(exe_path(), L"--tasks"); break;
     case WX_SETTINGS: shell_launch(L"ms-settings:"); break;
@@ -1006,6 +1314,7 @@ void quit() {
     if (g_quitting) return;
     g_quitting = true;
     start_close();
+    menu_close();
     switcher_command(L"switcherclose", L"");
     tray_stop();
     keys_stop();
@@ -1026,6 +1335,10 @@ void command(const std::wstring &line) {
         quit();
         return;
     }
+    if (what == L"reload") { // the resident saved the taskbar's settings
+        settings_apply(false);
+        return;
+    }
     if (what != L"cmd") return;
     size_t sp = rest.find(L' ');
     std::wstring verb = rest.substr(0, sp), arg = sp == std::wstring::npos ? L"" : rest.substr(sp + 1);
@@ -1043,6 +1356,28 @@ void command(const std::wstring &line) {
     else if (!shell_real() && tray_command(verb, arg)) {
     } else if (!shell_real() && (verb.compare(0, 6, L"switch") == 0 || verb == L"taskview")) switcher_command(verb, arg);
     else if (verb == L"crash" && !shell_real()) *(volatile int *)nullptr = 0; // tests: the restart after a crash
+    else if (!shell_real() && verb == L"barmenu" && !g_bars.empty()) { // the bar's menu over the main bar's middle, sticky
+        Bar *b = g_bars[0];
+        menu_open({ (b->rc.left + b->rc.right) / 2, b->rc.top }, true);
+    } else if (!shell_real() && verb == L"barmenushot")
+        log_line(std::string("bar menu shot ") + (g_menu && surf_shot(g_menu->s, arg, menu_draw, g_menu) ? "ok" : "failed"));
+    else if (!shell_real() && verb == L"barmenupick") menu_choose(_wtoi(arg.c_str())); // as a click on its nth row
+    else if (!shell_real() && verb == L"barmenuclose") menu_close();
+    else if (!shell_real() && verb == L"barlayout" && !g_bars.empty()) {
+        // where the main bar put Start and the apps, into the log: "centered" if the group's middle is the bar's
+        Bar *b = g_bars[0];
+        float l = 1e9f, r = -1e9f, w = bar_client(b).right;
+        for (const Btn &bt : b->btns)
+            if (bt.kind == B_TASK || bt.kind == B_PIN || (bt.kind == B_START && !(g_conf.start_left || !g_conf.center))) {
+                l = std::min(l, bt.r.left);
+                r = std::max(r, bt.r.right);
+            }
+        D2D1_RECT_F st = start_btn(b);
+        bool centered = r > l && std::fabs((l + r) / 2 - w / 2) < 4;
+        log_line("barlayout: " + std::string(centered ? "centered" : "not centered") + ", start " + (st.left < 8 ? "at the left end" : "with the apps") +
+                 ", height " + std::to_string((int)std::lround((b->rc.bottom - b->rc.top) * 96.0 / b->s.dpi)) + ", start icon " +
+                 (g_start_icon ? "custom" : "logo") + ", " + std::to_string(g_bars.size()) + " bars");
+    }
     else if (verb == L"tasks") { // what the bars show, into the log
         std::string s = "shell tasks:";
         for (const Task &t : g_tasks) {
@@ -1073,6 +1408,13 @@ LRESULT CALLBACK shell_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             tray_sweep(); // icons of apps that died without saying so
             redraw_all();
             break;
+        case kTimerSeconds: { // again at the next second, so it never drifts
+            SYSTEMTIME t;
+            GetLocalTime(&t);
+            SetTimer(h, kTimerSeconds, 1000 - t.wMilliseconds + 20, NULL);
+            redraw_all();
+            break;
+        }
         case kTimerStartup: {
             KillTimer(h, kTimerStartup);
             HANDLE t = CreateThread(NULL, 0, startup_thread, g_mode == M_SHELL ? nullptr : (void *)1, 0, NULL);
@@ -1224,8 +1566,23 @@ RECT shell_bar_rect(HMONITOR mon) {
     MONITORINFO mi = { sizeof(mi) };
     GetMonitorInfoW(mon, &mi);
     RECT r = mi.rcMonitor;
-    r.top = r.bottom - MulDiv((int)kBarH, (int)monitor_dpi(mon), 96);
+    r.top = r.bottom - MulDiv((int)g_dim.bar_h, (int)monitor_dpi(mon), 96);
     return r;
+}
+
+bool shell_start_button(HMONITOR mon, int *center_x) {
+    if (!g_conf.center || g_conf.start_left) return false;
+    for (Bar *b : g_bars)
+        if (b->mon == mon) {
+            D2D1_RECT_F r = start_btn(b);
+            *center_x = b->rc.left + (int)((r.left + r.right) / 2 * surf_scale(b->s));
+            return true;
+        }
+    return false;
+}
+
+void shell_settings_changed() {
+    if (FindWindowW(shell_class().c_str(), NULL)) app_send(shell_class(), L"reload\t", false, 0);
 }
 
 ShellMenu::ShellMenu(UINT dpi) : m(CreatePopupMenu()), px(MulDiv(16, (int)dpi, 96)) {
@@ -1317,6 +1674,21 @@ void shell_relaunch_after_update() {
     shell_launch(exe_path(), L"--shell");
 }
 
+// Winlogon keeps the sign-in screen (and, on a user's first sign-in, the "Hi" animation) up until the shell says it is
+// ready, as explorer does through these events; without them it waits ~30 s and the first sign-in can stay covered.
+// The same as Cairo/ManagedShell do.
+static void signal_shell_ready() {
+    const wchar_t *names[] = { L"Global\\msgina: ShellReadyEvent", L"msgina: ShellReadyEvent", L"ShellDesktopSwitchEvent", L"Global\\ShellDesktopSwitchEvent" };
+    int set = 0;
+    for (const wchar_t *n : names) {
+        HANDLE e = OpenEventW(EVENT_MODIFY_STATE, FALSE, n);
+        if (!e) continue;
+        if (SetEvent(e)) set++;
+        CloseHandle(e);
+    }
+    log_line("shell: told Winlogon the shell is ready (" + std::to_string(set) + " events)");
+}
+
 int shell_main(const std::wstring &cmd, bool quit_it, DWORD restarted) {
     if (restarted) { // the crashed one may not be gone yet: its mutex with it
         HANDLE old = OpenProcess(SYNCHRONIZE, FALSE, restarted);
@@ -1387,8 +1759,10 @@ int shell_main(const std::wstring &cmd, bool quit_it, DWORD restarted) {
         if (set_taskman) set_taskman(g_shell); // the system's task list (SC_TASKLIST) comes here, as it went to explorer
     }
 
+    settings_apply(true);
     load_pins();
     bars_create();
+    if (g_mode == M_SHELL) signal_shell_ready();
     hooks_start();
     scan();
     HWND f = GetForegroundWindow();

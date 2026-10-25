@@ -26,9 +26,15 @@ build version="":
       -municode -fno-exceptions -fno-rtti -s -DUNICODE -D_UNICODE -DNOMINMAX \
       -Wall -Wno-unused-function -Wno-missing-braces -Wno-unknown-pragmas "${def[@]}" \
       src/*.cpp res/explorer-lite.rc -o build/explorer-lite.exe -Wl,--subsystem,windows {{libs}}
+    # Windows Lite's C:\Windows\explorer.exe: hands explorer.exe's launches to explorer-lite (stub/explorer.cpp)
+    ZIG_LOCAL_CACHE_DIR=${ZIG_LOCAL_CACHE_DIR:-build/zig-cache} zig c++ -target x86_64-windows-gnu -O2 -std=c++17 \
+      -municode -fno-exceptions -fno-rtti -s -DUNICODE -D_UNICODE -DNOMINMAX -Wall \
+      stub/explorer.cpp -o build/explorer.exe -Wl,--subsystem,windows -lshell32 -lole32
     # a GUI never opens a console: the PE subsystem has to be 2 (windows)
-    python3 -c "import struct,sys; d=open('build/explorer-lite.exe','rb').read(); pe=struct.unpack('<I',d[0x3c:0x40])[0]; s=struct.unpack('<H',d[pe+92:pe+94])[0]; sys.exit(0 if s==2 else 'not a GUI exe (subsystem %d)' % s)"
-    ls -l build/explorer-lite.exe
+    for exe in build/explorer-lite.exe build/explorer.exe; do
+      python3 -c "import struct,sys; d=open(sys.argv[1],'rb').read(); pe=struct.unpack('<I',d[0x3c:0x40])[0]; s=struct.unpack('<H',d[pe+92:pe+94])[0]; sys.exit(0 if s==2 else 'not a GUI exe (subsystem %d)' % s)" "$exe"
+    done
+    ls -l build/explorer-lite.exe build/explorer.exe
 
 # build on the Mac and bring back build/explorer-lite.exe
 build-mac version="": (_cpu "mac")
@@ -36,6 +42,7 @@ build-mac version="": (_cpu "mac")
     mac sh 'cd ~/{{mac_dir}} && export PATH=/opt/homebrew/bin:$PATH && ZIG_LOCAL_CACHE_DIR=$HOME/{{mac_cache}}/zig just build {{version}}'
     mkdir -p build
     mac get {{mac_dir}}/build/explorer-lite.exe build/explorer-lite.exe
+    mac get {{mac_dir}}/build/explorer.exe build/explorer.exe
 
 # build on the PC when the Mac is busy (its zig in %LOCALAPPDATA%\fp-tools\zig) and bring back build/explorer-lite.exe
 build-pc: (_cpu "windows")

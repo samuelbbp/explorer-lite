@@ -9,12 +9,14 @@
 #   send <args>        runs explorer-lite.exe --instance test <args> and waits for it (a command for the resident)
 #   cmd <verb> <arg>   = send --cmd "<verb> <arg>"
 #   shot <name>        = cmd shot <out>\<name>.png, then waits for the file
+#   png <verb> <name>  the same through any of the resident's shot verbs (settingsshot)
 #   sleep <ms>
 #   mem <label>        the resident's working set and private bytes, into results.json
 #   shell <args>       starts the shell (explorer-lite.exe --instance test --shell <args>), not waited for
 #   shellcmd <verb> <arg>   = send --shell --cmd "<verb> <arg>" (a command for the shell)
 #   shellshot <name>   the shell's main taskbar into <out>\<name>.png; startshot <name>: Start (open) the same way
-#   shellpng <verb> <name>   the same through any of the shell's shot verbs (overflowshot, balloonshot, switchershot)
+#   shellpng <verb> <name>   the same through any of the shell's shot verbs (overflowshot, balloonshot, switchershot,
+#                      barmenushot)
 #   shellmem <label>   the shell's memory, like mem
 #   logcheck <text>    an error unless the log has a line with <text> (what the app checked itself, e.g. filtertest)
 #   stop               ends the resident and the shell (and what they started)
@@ -102,6 +104,7 @@ try {
             'send' { Send $rest }
             'cmd' { Send "--cmd `"$rest`"" }
             'shot' { Shot '' 'shot' $rest }
+            'png' { $v, $n = $rest -split ' ', 2; Shot '' $v $n }
             'sleep' { Start-Sleep -Milliseconds ([int]$rest) }
             'mem' { Mem $resident $rest 'resident' }
             'shell' { $script:shell = [TestDesk]::Run($exe, "--instance test --shell $rest", $deskName, 0) }

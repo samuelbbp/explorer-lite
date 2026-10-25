@@ -642,7 +642,8 @@ void start_open(HMONITOR mon, bool sticky) {
     MONITORINFO mi = { sizeof(mi) };
     GetMonitorInfoW(mon, &mi);
     int cw = MulDiv((int)kW, (int)dpi, 96), ch = MulDiv((int)kH, (int)dpi, 96), gap = MulDiv((int)kGap, (int)dpi, 96);
-    int x = mi.rcMonitor.left + gap, y = bar.top - gap - ch;
+    int x = mi.rcMonitor.left + gap, y = bar.top - gap - ch, btn = 0;
+    if (shell_start_button(mon, &btn)) x = std::max((int)mi.rcMonitor.left + gap, std::min((int)mi.rcMonitor.right - gap - cw, btn - cw / 2)); // above it
     g_st = w;
     w->s.dpi = dpi;
     w->s.hwnd = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_TOPMOST, start_class().c_str(), L"Start", WS_POPUP | WS_CLIPCHILDREN, x, y, cw, ch, NULL, NULL,
