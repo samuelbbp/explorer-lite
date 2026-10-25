@@ -9,11 +9,12 @@
 #include <shlobj.h>
 #include <string>
 
+// the user's own install first (the updater keeps it current), the machine-wide copy otherwise
 static std::wstring target() {
     wchar_t buf[MAX_PATH];
-    ExpandEnvironmentStringsW(L"%ProgramFiles%\\explorer-lite\\explorer-lite.exe", buf, MAX_PATH);
-    if (GetFileAttributesW(buf) != INVALID_FILE_ATTRIBUTES) return buf;
     ExpandEnvironmentStringsW(L"%LOCALAPPDATA%\\Programs\\explorer-lite\\explorer-lite.exe", buf, MAX_PATH);
+    if (GetFileAttributesW(buf) != INVALID_FILE_ATTRIBUTES) return buf;
+    ExpandEnvironmentStringsW(L"%ProgramFiles%\\explorer-lite\\explorer-lite.exe", buf, MAX_PATH);
     return buf;
 }
 

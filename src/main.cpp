@@ -565,6 +565,24 @@ int everything_probe(const Command &c) {
     return (int)m.wParam;
 }
 
+// A shell started from the machine-wide copy (Program Files: an OS image puts it there for every user) hands over to
+// this user's own install when there is one: that copy is the one the updater keeps current
+bool shell_handoff() {
+    if (!shell_real()) return false;
+    wchar_t self[MAX_PATH], mine[MAX_PATH];
+    GetModuleFileNameW(NULL, self, MAX_PATH);
+    ExpandEnvironmentStringsW(L"%LOCALAPPDATA%\\Programs\\explorer-lite\\explorer-lite.exe", mine, MAX_PATH);
+    if (_wcsicmp(self, mine) == 0 || GetFileAttributesW(mine) == INVALID_FILE_ATTRIBUTES) return false;
+    std::wstring line = L"\"" + std::wstring(mine) + L"\" --shell";
+    STARTUPINFOW si = { sizeof(si) };
+    PROCESS_INFORMATION pi = {};
+    if (!CreateProcessW(mine, line.data(), NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) return false;
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    log_line("shell: handed over to this user's own install");
+    return true;
+}
+
 } // namespace
 
 // The running process whose hidden window is of class `cls` gets `line` (WM_COPYDATA). For a quit, waits until it
@@ -638,6 +656,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
         return 0;
     }
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    if (cmd.shell && cmd.cmd.empty() && !cmd.quit && !cmd.restarted && shell_handoff()) return 0;
     if (cmd.shell) return shell_main(cmd.cmd, cmd.quit, cmd.restarted);
     // the installer's --quit: the shell goes too (and comes back with --updated), so nothing keeps the exe in use
     int shell_quit = cmd.quit ? shell_quit_running() : 0;
