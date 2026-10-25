@@ -18,7 +18,10 @@ rm -rf dist && mkdir -p "$out"
 LC_ALL=C grep -qE "(^|[^0-9.])${version//./\\.}\$" < <(LC_ALL=C tr '\0' '\n' < "$exe" 2>/dev/null) \
     || { echo "$exe is not $version (just build $version stamps it)" >&2; exit 1; }
 cp "$exe" "$out/explorer-lite.exe"
-(cd "$out" && zip -q -X "../explorer-lite-$version-windows-x64.zip" explorer-lite.exe)
+# the zip also carries Windows Lite's explorer.exe stand-in (stub/explorer.cpp); the installer does not need it
+[ -f build/explorer.exe ] || { echo "no build/explorer.exe" >&2; exit 1; }
+cp build/explorer.exe "$out/explorer.exe"
+(cd "$out" && zip -q -X "../explorer-lite-$version-windows-x64.zip" explorer-lite.exe explorer.exe)
 makensis -V2 -NOCD -DVERSION="$version" -DVERSION_NUM="$numeric" installer/explorer-lite.nsi
 # the installer's .sha256 is required by the updater (a release asset); the zip's, for whoever downloads it by hand
 for f in "explorer-lite-Setup-$version.exe" "explorer-lite-$version-windows-x64.zip"; do
