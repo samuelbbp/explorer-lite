@@ -14,6 +14,7 @@
 #   shell <args>       starts the shell (explorer-lite.exe --instance test --shell <args>), not waited for
 #   shellcmd <verb> <arg>   = send --shell --cmd "<verb> <arg>" (a command for the shell)
 #   shellshot <name>   the shell's main taskbar into <out>\<name>.png; startshot <name>: Start (open) the same way
+#   shellpng <verb> <name>   the same through any of the shell's shot verbs (overflowshot, balloonshot, switchershot)
 #   shellmem <label>   the shell's memory, like mem
 #   logcheck <text>    an error unless the log has a line with <text> (what the app checked itself, e.g. filtertest)
 #   stop               ends the resident and the shell (and what they started)
@@ -68,14 +69,16 @@ $results = [ordered]@{ mem = @(); shots = @(); errors = @() }
 $resident = 0
 $shell = 0
 function Send([string]$a) { [void][TestDesk]::Run($exe, "--instance test $a", $deskName, 20000) }
-# a PNG drawn by the app itself (a --cmd verb that takes the path), waited for
+# a PNG drawn by the app itself (a --cmd verb that takes a file name: it writes only into its data folder's shots),
+# waited for and moved to the results
 function Shot([string]$prefix, [string]$verb, [string]$name) {
     $f = Join-Path $out "$name.png"
-    Remove-Item -Force -ErrorAction SilentlyContinue $f
-    Send "$prefix--cmd `"$verb $f`""
-    for ($t = 0; $t -lt 50 -and -not (Test-Path $f); $t++) { Start-Sleep -Milliseconds 100 }
+    $made = Join-Path $data "shots\$name.png"
+    Remove-Item -Force -ErrorAction SilentlyContinue $f, $made
+    Send "$prefix--cmd `"$verb $name.png`""
+    for ($t = 0; $t -lt 50 -and -not (Test-Path $made); $t++) { Start-Sleep -Milliseconds 100 }
     Start-Sleep -Milliseconds 200
-    if (Test-Path $f) { $script:results.shots += "$name.png" } else { $script:results.errors += "no shot $name" }
+    if (Test-Path $made) { Move-Item -Force $made $f; $script:results.shots += "$name.png" } else { $script:results.errors += "no shot $name" }
 }
 function Mem([int]$id, [string]$label, [string]$who) {
     $p = Get-Process -Id $id -ErrorAction SilentlyContinue
@@ -105,6 +108,7 @@ try {
             'shellcmd' { Send "--shell --cmd `"$rest`"" }
             'shellshot' { Shot '--shell ' 'shot' $rest }
             'startshot' { Shot '--shell ' 'startshot' $rest }
+            'shellpng' { $v, $n = $rest -split ' ', 2; Shot '--shell ' $v $n }
             'shellmem' { Mem $shell $rest 'shell' }
             'logcheck' {
                 $log = Join-Path $data 'explorer-lite.log'

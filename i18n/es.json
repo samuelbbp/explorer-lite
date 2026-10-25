@@ -163,12 +163,18 @@
  "Close the taskbar": "Cerrar la barra de tareas",
  "Type to search apps": "Escribe para buscar aplicaciones",
  "All apps": "Todas las aplicaciones",
- "{0} results": "{0} resultados",
  "Listing apps…": "Buscando aplicaciones…",
  "No apps found": "No se encontraron aplicaciones",
  "No apps match «{0}»": "Ninguna aplicación coincide con «{0}»",
  "Lock": "Bloquear",
  "Sleep": "Suspender",
  "Sign out": "Cerrar sesión",
- "Shut down": "Apagar"
+ "Shut down": "Apagar",
+ "Settings": "Configuración",
+ "Terminal": "Terminal",
+ "Run": "Ejecutar",
+ "Files and folders": "Archivos y carpetas",
+ "Files: Everything is not running": "Archivos: Everything no está abierto",
+ "Apps ({0})": "Aplicaciones ({0})",
+ "No windows open": "No hay ventanas abiertas"
 }

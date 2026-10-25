@@ -26,7 +26,19 @@ HMONITOR shell_primary();
 UINT shell_monitor_dpi(HMONITOR mon);
 RECT shell_bar_rect(HMONITOR mon); // pixels: where the monitor's taskbar is (or would be)
 
-// A menu with an icon on each row (as the tray's), opened at the cursor above it.
+std::wstring shell_process_path(DWORD pid);
+bool shell_fullscreen(HMONITOR mon); // a fullscreen app (a game, a video) is in front there
+void shell_tray_changed();          // tray icons came, went or moved: the bars' layout again
+void shell_work_area_update();      // an appbar moved: each monitor's work area again (the session's shell only)
+struct ShellWindow {
+    HWND hwnd;
+    std::wstring title;
+    const Thumb *icon; // the bar's (may be null)
+};
+std::vector<ShellWindow> shell_windows_by_use(); // the taskbar's windows, the one in front first
+void shell_activate(HWND h);       // restored if minimized, to the front
+
+// A menu with an icon on each row (as the tray's), opened at the cursor above it (or above `at`).
 struct ShellMenu {
     HMENU m;
     std::vector<HBITMAP> bmps;
@@ -35,7 +47,7 @@ struct ShellMenu {
     ~ShellMenu();
     void add(UINT id, const wchar_t *glyph, const std::wstring &label);
     void sep();
-    UINT show(HWND owner); // the id chosen, 0 if none
+    UINT show(HWND owner, const POINT *at = nullptr); // the id chosen, 0 if none
 };
 
 // start.cpp
@@ -50,3 +62,12 @@ void start_theme_changed();
 void start_prepare();            // the list of apps made in the background (the saved one loaded first)
 void start_on_apps(void *list);  // WM_APP_APPS reached the shell's window: the new list (takes it)
 void start_list_probe(); // --apps: the list Start would show, into the log (tests: no window needed)
+void start_power(int what); // 1 lock, 2 sleep, 3 sign out, 4 restart, 5 shut down (a test instance only logs it)
+
+// switcher.cpp: Alt+Tab (the keyboard hook drives it) and Win+Tab
+void switcher_step(int step);
+void switcher_done();
+void switcher_cancel();
+void taskview_toggle();
+bool switcher_is_open();
+void switcher_command(const std::wstring &verb, const std::wstring &arg); // switcher, taskview, switchstep, switchershot...

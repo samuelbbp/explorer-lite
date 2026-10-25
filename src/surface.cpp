@@ -1,5 +1,6 @@
 // surface.cpp: see surface.h.
 #include "surface.h"
+#include "util.h"
 #include <wincodec.h>
 #include <algorithm>
 #include <vector>
@@ -69,8 +70,9 @@ void surf_paint(Surface &s, void (*draw)(void *), void *ctx) {
     }
 }
 
-bool surf_shot(const std::vector<ShotPart> &parts, const std::wstring &png) {
-    if (!g_d2d || parts.empty()) return false;
+bool surf_shot(const std::vector<ShotPart> &parts, const std::wstring &name) {
+    std::wstring png = shot_path(name);
+    if (!g_d2d || parts.empty() || png.empty()) return false;
     IWICImagingFactory *wic = nullptr;
     CoCreateInstance(CLSID_WICImagingFactory, NULL, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic));
     if (!wic) return false;
@@ -146,11 +148,16 @@ void surf_formats(Surface &s) {
     s.f_small_r = make_format(ui, 11.5f, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_TRAILING);
     s.f_big = make_format(ui, 15, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_ALIGNMENT_LEADING);
     s.f_icon = make_format(icon_font(), 15, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER);
+    s.f_bold = make_format(ui, 12.5f, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_ALIGNMENT_LEADING);
+    if ((s.f_wrap = make_format(ui, 12.5f, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING))) {
+        s.f_wrap->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
+        s.f_wrap->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+    }
 }
 
 void surf_free(Surface &s) {
     drop_target(s);
-    for (IDWriteTextFormat **f : { &s.f_ui, &s.f_ui_c, &s.f_small, &s.f_small_r, &s.f_icon, &s.f_big }) release(*f);
+    for (IDWriteTextFormat **f : { &s.f_ui, &s.f_ui_c, &s.f_small, &s.f_small_r, &s.f_icon, &s.f_big, &s.f_wrap, &s.f_bold }) release(*f);
 }
 
 void surf_text(Surface &s, const std::wstring &t, D2D1_RECT_F r, IDWriteTextFormat *f, uint32_t rgb, float a) {
@@ -166,6 +173,15 @@ float surf_text_width(Surface &s, const std::wstring &t, IDWriteTextFormat *f) {
     l->GetMetrics(&m);
     l->Release();
     return m.widthIncludingTrailingWhitespace;
+}
+
+float surf_text_height(const std::wstring &t, IDWriteTextFormat *f, float width) {
+    IDWriteTextLayout *l = nullptr;
+    if (!f || !g_dw || FAILED(g_dw->CreateTextLayout(t.c_str(), (UINT32)t.size(), f, width, 10000, &l))) return 0;
+    DWRITE_TEXT_METRICS m = {};
+    l->GetMetrics(&m);
+    l->Release();
+    return m.height;
 }
 
 void surf_fill(Surface &s, D2D1_RECT_F r, uint32_t rgb, float a) {

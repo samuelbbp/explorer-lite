@@ -40,8 +40,9 @@ struct Icons {
 void folder_sort(std::vector<Item> &items, int col, bool desc);
 
 // Search through Everything (voidtools) if it is running: what matches `text` under `path` (everywhere if ""),
-// answered later with WM_COPYDATA to wnd (dwData = id). False if Everything is not there.
-bool folder_search(HWND wnd, DWORD id, const std::wstring &path, const std::wstring &text);
+// answered later with WM_COPYDATA to wnd (dwData = id): up to `max` results, by name or the most recently changed
+// first. False if Everything is not there.
+bool folder_search(HWND wnd, DWORD id, const std::wstring &path, const std::wstring &text, DWORD max = 5000, bool recent_first = false);
 // Everything's answer as items (their type column says the folder they are in)
 void folder_search_items(const COPYDATASTRUCT *cds, std::vector<Item> &items);
 

@@ -61,6 +61,7 @@ struct View {
     bool rename_after = false;         // a new folder: renamed as soon as it shows up
     bool results = false;              // all holds Everything's results for the search, not the folder
     DWORD search_id = 0;               // the search whose answer this view waits for
+    double typed_at = 0;               // when the search text last changed (now_ms): how long its answer took
     double list_ms = 0;
     TasksView *tasks = nullptr;
 };
@@ -1619,7 +1620,9 @@ LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 v.filter = t;
                 if (!v.results) apply_filter(v); // the folder filtered at once; Everything's results a moment later
                 v.scroll = 0;
-                SetTimer(h, 8, 250, NULL);
+                v.typed_at = now_ms();
+                // Everything answers in a few ms: asked right away (the timer only joins keys that come together, a paste)
+                SetTimer(h, 8, USER_TIMER_MINIMUM, NULL);
                 redraw(w);
             }
         }
@@ -1715,7 +1718,7 @@ LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             v.focus = v.anchor = -1;
             v.scroll = 0;
             apply_filter(v);
-            log_line("everything: " + std::to_string(v.all.size()) + " results");
+            log_line("everything: " + std::to_string(v.all.size()) + " results, " + std::to_string((int)(now_ms() - v.typed_at)) + " ms after the key");
             redraw(w);
             return TRUE;
         }
@@ -1941,7 +1944,9 @@ void window_close_all() {
 }
 
 // The last used window, drawn into a PNG (tests and screenshots: no screen capture, nothing has to be visible).
-bool window_shot(const std::wstring &png) {
+bool window_shot(const std::wstring &name) {
+    std::wstring png = shot_path(name);
+    if (png.empty()) return false;
     Win *w = nullptr;
     for (Win *x : g_wins)
         if (!w || x->last_used > w->last_used) w = x;
