@@ -101,7 +101,21 @@ struct Win {
     bool drag_maybe = false;           // a row pressed: a drag starts if the mouse moves far enough
     POINT drag_from = {};
     int collapse_to = -1;              // a click on a selected row: the selection collapses on release, unless dragged
+    // the marquee: pressed on empty space in the list, a drag selects what its rectangle touches
+    int mq = 0;                        // 0 none, 1 pressed (not moved enough yet), 2 dragging
+    bool mq_clear = false;             // pressed on empty space without Ctrl: released without moving, nothing is selected
+    int mq_mode = 0;                   // MQ_REPLACE, MQ_ADD (Shift) or MQ_TOGGLE (Ctrl)
+    float mq_ax = 0, mq_ay = 0;        // the anchor: client x, content y (y + scroll), so it scrolls with the list
+    float mq_x = 0, mq_y = 0;          // the pointer, client DIPs (also what auto-scroll goes by)
+    std::vector<uint8_t> mq_before;    // the selection at the press: Esc restores it, Shift and Ctrl build on it
+    int mq_focus = -1, mq_anchor = -1;
+    int mq_l0 = 0, mq_l1 = -1, mq_c0 = 0, mq_c1 = -1; // lines and columns applied last (l1 < l0: none)
+    uint64_t mq_gen = 0;               // the listing it began on: another one ends it
+    int mq_tab = 0;
+    bool mq_grid = false;              // and its layout (Ctrl+wheel may change it mid-drag)
 };
+
+enum { MQ_REPLACE, MQ_ADD, MQ_TOGGLE };
 
 std::vector<Win *> g_wins;
 bool g_shot; // drawing for --cmd shot: the edit controls are not in the bitmap, so their text is drawn
@@ -958,6 +972,17 @@ void draw_list(Win *w, D2D1_RECT_F c) {
             text(w, it.size, D2D1::RectF(std::max(xs[COL_SIZE] + 4, xs[COL_COUNT] - 12 - tw), y, xs[COL_COUNT] - 8, y + kRowH), w->f_ui, kDim);
         }
     }
+    if (w->mq == 2) { // the marquee: the accent, see-through, with a 1 px border on whole pixels (kept near the list)
+        float s = scale(w), ay = w->mq_ay - v.scroll + l.top;
+        auto px = [&](float d, float lo, float hi) { return std::round(std::max(lo - 1, std::min(hi + 1, d)) * s); };
+        float x0 = px(std::min(w->mq_ax, w->mq_x), l.left, l.right), x1 = px(std::max(w->mq_ax, w->mq_x), l.left, l.right);
+        float y0 = px(std::min(ay, w->mq_y), l.top, l.bottom), y1 = px(std::max(ay, w->mq_y), l.top, l.bottom);
+        fill(w, D2D1::RectF(x0 / s, y0 / s, x1 / s, y1 / s), kAccent, 0.25f);
+        if (x1 - x0 >= 1 && y1 - y0 >= 1) {
+            w->br->SetColor(color(kAccent, 0.9f));
+            w->dc->DrawRectangle(D2D1::RectF((x0 + 0.5f) / s, (y0 + 0.5f) / s, (x1 - 0.5f) / s, (y1 - 0.5f) / s), w->br, 1 / s);
+        }
+    }
     w->dc->PopAxisAlignedClip();
     if (g_shot && IsWindowVisible(w->rename)) { // the rename box is a child window: not in the bitmap otherwise
         RECT r;
@@ -1125,7 +1150,175 @@ int row_at(Win *w, float x, float y) {
     return p;
 }
 
+// Details: only the icon and the name's text are the item; the rest of the row is space a marquee starts from (as File
+// Explorer does). A tile is the item whole.
+bool on_name(Win *w, View &v, int p, float x) {
+    if (is_grid(v)) return true;
+    float x0 = list_rect(w).left + 8;
+    float end = std::min(x0 + name_width(w) - 8, x0 + 28 + text_width(w, v.all[v.shown[p]].name, w->f_ui) + 4);
+    return x >= x0 && x < end;
+}
+
+// --- the marquee: a rectangle dragged from empty space selects what it touches --------------------------------------
+// Everything is worked out from the selection at the press (mq_before), and on each move only the lines that came into
+// or left the rectangle are set again: a drag over 100 000 rows costs what the rows it crossed since the last move cost.
+
+// along one axis, the items k = 0..count-1, each [origin + k * pitch + in0, origin + (k + 1) * pitch - in1): those
+// [lo, hi] touches are a..b (b < a: none)
+void touched(float lo, float hi, float origin, float pitch, float in0, float in1, int count, int &a, int &b) {
+    a = std::max(0, (int)std::floor((lo - origin - pitch + in1) / pitch) + 1);
+    b = std::min(count - 1, (int)std::ceil((hi - origin - in0) / pitch) - 1);
+}
+
+// the items of one line, columns c0..c1, inside the rectangle or not
+void mq_set(Win *w, View &v, int line, int c0, int c1, bool in) {
+    int per = per_line(w, v), n = (int)v.shown.size();
+    for (int c = c0; c <= c1; c++) {
+        int p = line * per + c;
+        if (p >= n) break;
+        int i = v.shown[p];
+        uint8_t was = w->mq_before[i];
+        v.sel[i] = in ? (w->mq_mode == MQ_TOGGLE ? !was : 1) : (w->mq_mode == MQ_REPLACE ? 0 : was);
+    }
+}
+
+// the view it began on, with the same listing (a refresh or another folder ends it)
+bool mq_valid(Win *w) {
+    View &v = cur_view(w);
+    return w->cur == w->mq_tab && v.kind == TAB_FILES && v.gen == w->mq_gen && v.sel.size() == w->mq_before.size() && is_grid(v) == w->mq_grid;
+}
+
+void marquee_end(Win *w, bool cancel) {
+    if (!w->mq) return;
+    View &v = cur_view(w);
+    bool valid = mq_valid(w), dragged = w->mq == 2;
+    w->mq = 0; // before ReleaseCapture: its WM_CAPTURECHANGED comes back here
+    KillTimer(w->hwnd, 9);
+    if (GetCapture() == w->hwnd) ReleaseCapture();
+    if (valid && cancel) { // Esc: the selection as it was
+        v.sel = w->mq_before;
+        v.focus = w->mq_focus;
+        v.anchor = w->mq_anchor;
+    } else if (valid && dragged && w->mq_l0 <= w->mq_l1) { // the focus on the touched item nearest the pointer
+        D2D1_RECT_F l = list_rect(w);
+        int per = per_line(w, v), line = (int)std::floor((w->mq_y - l.top + v.scroll) / line_h(v));
+        int col = is_grid(v) ? (int)std::floor((w->mq_x - l.left - 6) / tile_w(v)) : 0;
+        line = std::max(w->mq_l0, std::min(w->mq_l1, line));
+        col = std::max(w->mq_c0, std::min(w->mq_c1, col));
+        int p = std::min((int)v.shown.size() - 1, line * per + col);
+        if (p >= 0) v.focus = v.anchor = p;
+    }
+    std::vector<uint8_t>().swap(w->mq_before);
+    redraw(w);
+}
+
+// the rectangle from the anchor to the pointer: what it touches now; false when nothing changed
+bool marquee_update(Win *w) {
+    View &v = cur_view(w);
+    if (!mq_valid(w)) return marquee_end(w, false), false;
+    D2D1_RECT_F l = list_rect(w);
+    float total = content_h(w, v), py = w->mq_y - l.top + v.scroll;
+    float y0 = std::max(0.f, std::min(w->mq_ay, py)), y1 = std::min(total, std::max(w->mq_ay, py));
+    float x0 = std::min(w->mq_ax, w->mq_x), x1 = std::max(w->mq_ax, w->mq_x);
+    int per = per_line(w, v), lines = ((int)v.shown.size() + per - 1) / per, l0, l1, c0, c1;
+    if (is_grid(v)) {
+        touched(y0, y1, 0, line_h(v), 4, 2, lines, l0, l1); // item_rect's tile, inside its cell
+        touched(x0, x1, l.left + 6, tile_w(v), 2, 2, per, c0, c1);
+    } else {
+        touched(y0, y1, 0, kRowH, 1, 1, lines, l0, l1);
+        c0 = 0, c1 = x1 > l.left + 4 && x0 < l.right - kScrollW - 2 ? 0 : -1; // the row, across all its columns
+    }
+    if (l1 < l0 || c1 < c0) l0 = 0, l1 = -1, c0 = 0, c1 = -1;
+    int o0 = w->mq_l0, o1 = w->mq_l1, oc0 = w->mq_c0, oc1 = w->mq_c1;
+    if (l0 == o0 && l1 == o1 && c0 == oc0 && c1 == oc1) return false;
+    // lines that left, lines that came in, and (if the columns changed) the lines in both
+    auto outside = [](int a0, int a1, int b0, int b1, auto f) { // each line of a0..a1 not in b0..b1
+        if (b1 < b0) {
+            for (int k = a0; k <= a1; k++) f(k);
+            return;
+        }
+        for (int k = a0; k <= std::min(a1, b0 - 1); k++) f(k);
+        for (int k = std::max(a0, b1 + 1); k <= a1; k++) f(k);
+    };
+    outside(o0, o1, l0, l1, [&](int k) { mq_set(w, v, k, oc0, oc1, false); });
+    outside(l0, l1, o0, o1, [&](int k) { mq_set(w, v, k, c0, c1, true); });
+    if (c0 != oc0 || c1 != oc1)
+        for (int k = std::max(o0, l0); k <= std::min(o1, l1); k++) {
+            mq_set(w, v, k, oc0, oc1, false);
+            mq_set(w, v, k, c0, c1, true);
+        }
+    w->mq_l0 = l0, w->mq_l1 = l1, w->mq_c0 = c0, w->mq_c1 = c1;
+    return true;
+}
+
+// pressed on empty space: a marquee if the mouse moves far enough (the selection kept to build on, or restore)
+void marquee_press(Win *w, float x, float y, int mode) {
+    View &v = cur_view(w);
+    w->mq = 1;
+    w->mq_mode = mode;
+    w->mq_ax = w->mq_x = x;
+    w->mq_y = y;
+    w->mq_ay = y - list_rect(w).top + v.scroll;
+    w->mq_before = v.sel;
+    w->mq_focus = v.focus;
+    w->mq_anchor = v.anchor;
+    w->mq_l0 = w->mq_c0 = 0, w->mq_l1 = w->mq_c1 = -1;
+    w->mq_gen = v.gen;
+    w->mq_tab = w->cur;
+    w->mq_grid = is_grid(v);
+    SetCapture(w->hwnd);
+}
+
+// past the list's top or bottom (or within a few DIPs of it), how far: the list scrolls that way, faster the further
+float mq_overshoot(Win *w) {
+    D2D1_RECT_F l = list_rect(w);
+    const float band = 8;
+    return w->mq_y < l.top + band ? w->mq_y - (l.top + band) : w->mq_y > l.bottom - band ? w->mq_y - (l.bottom - band) : 0;
+}
+
+// true while the marquee has the mouse
+bool marquee_move(Win *w, float x, float y) {
+    if (!w->mq) return false;
+    w->mq_x = x;
+    w->mq_y = y;
+    View &v = cur_view(w);
+    if (w->mq == 1) {
+        float s = scale(w), ay = w->mq_ay - v.scroll + list_rect(w).top;
+        if (std::fabs(x - w->mq_ax) * s <= GetSystemMetrics(SM_CXDRAG) && std::fabs(y - ay) * s <= GetSystemMetrics(SM_CYDRAG)) return true;
+        if (!mq_valid(w)) return marquee_end(w, false), true;
+        w->mq = 2;
+        w->collapse_to = -1;
+        if (w->mq_mode == MQ_REPLACE) std::fill(v.sel.begin(), v.sel.end(), 0);
+        else v.sel = w->mq_before; // the press on a row may have changed it
+        w->hover = H_NONE, w->hover_arg = -1;
+    }
+    marquee_update(w);
+    if (w->mq && mq_overshoot(w)) SetTimer(w->hwnd, 9, 30, NULL);
+    redraw(w); // the rectangle moved even when the selection did not
+    return true;
+}
+
+// timer 9: the list scrolls under a marquee held past its edge, and the rectangle grows with it
+void marquee_scroll(Win *w) {
+    float d = w->mq == 2 ? mq_overshoot(w) : 0;
+    if (!d) {
+        KillTimer(w->hwnd, 9);
+        return;
+    }
+    View &v = cur_view(w);
+    float was = v.scroll, step = std::max(4.f, std::min(20 * kRowH, std::fabs(d)));
+    v.scroll += d < 0 ? -step : step;
+    clamp_scroll(w, v);
+    if (v.scroll == was) { // the end of the list: again when the pointer moves
+        KillTimer(w->hwnd, 9);
+        return;
+    }
+    marquee_update(w);
+    redraw(w);
+}
+
 void on_move(Win *w, float x, float y) {
+    if (marquee_move(w, x, y)) return;
     if (w->drag_maybe && GetKeyState(VK_LBUTTON) < 0) {
         POINT pt;
         GetCursorPos(&pt);
@@ -1167,13 +1360,14 @@ void on_move(Win *w, float x, float y) {
     }
 }
 
-void on_down(Win *w, float x, float y, bool dbl, bool right) {
+// keys: the message's MK_ flags (Ctrl and Shift as they were when pressed)
+void on_down(Win *w, float x, float y, bool dbl, bool right, UINT keys) {
     View &v = cur_view(w);
     const Region *r = hit(w, x, y);
-    if (!r) return;
+    if (!r || w->mq) return;
     w->press = r->id;
     w->press_arg = r->arg;
-    bool ctrl = GetKeyState(VK_CONTROL) < 0, shift = GetKeyState(VK_SHIFT) < 0;
+    bool ctrl = (keys & MK_CONTROL) != 0, shift = (keys & MK_SHIFT) != 0;
     switch (r->id) {
     case H_SCROLL: {
         D2D1_RECT_F l = list_rect(w);
@@ -1194,14 +1388,25 @@ void on_down(Win *w, float x, float y, bool dbl, bool right) {
             tasks_click(v.tasks, w->hwnd, x, y, dbl, right);
             break;
         }
-        int p = row_at(w, x, y);
+        int p = row_at(w, x, y), mode = ctrl ? MQ_TOGGLE : shift ? MQ_ADD : MQ_REPLACE;
         if (p < 0) {
-            if (!ctrl) select_only(v, -1);
+            if (right) {
+                if (!ctrl) select_only(v, -1);
+            } else {
+                marquee_press(w, x, y, mode);
+                w->mq_clear = !ctrl; // a click without moving: nothing selected (on release)
+            }
             break;
         }
         if (dbl && !right) {
             open_item(w, v.all[v.shown[p]], ctrl);
             return;
+        }
+        // the row's empty part: a click there is a click on the row, a drag a marquee (the name drags the files)
+        bool marquee = !right && !on_name(w, v, p, x);
+        if (marquee) {
+            marquee_press(w, x, y, mode); // before the click changes the selection
+            w->mq_clear = false;
         }
         if (shift) select_range(v, p);
         else if (ctrl && !right) {
@@ -1210,7 +1415,7 @@ void on_down(Win *w, float x, float y, bool dbl, bool right) {
         } else if (v.sel[v.shown[p]] && selected(v).size() > 1) {
             if (!right) w->collapse_to = p; // on release, if it was not a drag
         } else select_only(v, p);
-        if (!right && v.sel[v.shown[p]]) {
+        if (!right && !marquee && v.sel[v.shown[p]]) {
             w->drag_maybe = true;
             GetCursorPos(&w->drag_from);
         }
@@ -1225,6 +1430,11 @@ void set_grid(Win *w, bool on);
 void on_up(Win *w, float x, float y, bool middle) {
     if (!middle) {
         w->drag_maybe = false;
+        if (w->mq) {
+            bool clicked = w->mq == 1 && w->mq_clear && mq_valid(w);
+            marquee_end(w, false);
+            if (clicked) select_only(cur_view(w), -1);
+        }
         if (w->collapse_to >= 0 && cur_view(w).kind == TAB_FILES && row_at(w, x, y) == w->collapse_to) select_only(cur_view(w), w->collapse_to);
         w->collapse_to = -1;
     }
@@ -1324,6 +1534,7 @@ void move_focus(Win *w, int to, bool shift, bool ctrl) {
 }
 
 bool on_key(Win *w, WPARAM key) {
+    if (w->mq && key == VK_ESCAPE) return marquee_end(w, true), true; // the drag undone
     View &v = cur_view(w);
     bool ctrl = GetKeyState(VK_CONTROL) < 0, shift = GetKeyState(VK_SHIFT) < 0, alt = GetKeyState(VK_MENU) < 0;
     D2D1_RECT_F l = list_rect(w);
@@ -1630,6 +1841,7 @@ LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_ERASEBKGND: return 1;
     case WM_PAINT: paint(w); return 0;
     case WM_SIZE:
+        marquee_end(w, false); // its lines and columns were of the old layout
         if (w->rt) w->rt->Resize(D2D1::SizeU(LOWORD(lp), HIWORD(lp)));
         if (!w->views.empty()) {
             clamp_scroll(w, cur_view(w));
@@ -1664,8 +1876,9 @@ LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_LBUTTONDOWN:
     case WM_LBUTTONDBLCLK:
     case WM_RBUTTONDOWN:
-        on_down(w, GET_X_LPARAM(lp) / s, GET_Y_LPARAM(lp) / s, msg == WM_LBUTTONDBLCLK, msg == WM_RBUTTONDOWN);
+        on_down(w, GET_X_LPARAM(lp) / s, GET_Y_LPARAM(lp) / s, msg == WM_LBUTTONDBLCLK, msg == WM_RBUTTONDOWN, (UINT)wp);
         return 0;
+    case WM_CAPTURECHANGED: marquee_end(w, false); return 0; // taken by someone else: the marquee stops where it is
     case WM_LBUTTONUP: on_up(w, GET_X_LPARAM(lp) / s, GET_Y_LPARAM(lp) / s, false); return 0;
     case WM_MBUTTONDOWN: {
         const Region *r = hit(w, GET_X_LPARAM(lp) / s, GET_Y_LPARAM(lp) / s);
@@ -1742,9 +1955,13 @@ LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             } else if (!folder_search(h, v.search_id = ++ids, folder_virtual(v.path) ? L"" : v.path, v.filter)) v.search_id = 0;
             return 0;
         }
+        if (wp == 9) {
+            marquee_scroll(w);
+            return 0;
+        }
         if (wp == 7) {
             View &v = cur_view(w);
-            if (IsWindowVisible(w->rename)) return 0; // after the rename
+            if (IsWindowVisible(w->rename) || w->mq) return 0; // after the rename, or the marquee
             KillTimer(h, 7);
             if (v.kind == TAB_FILES && !v.path.empty() && !v.results) load(w, v);
             return 0;
@@ -2041,6 +2258,19 @@ void window_command(const std::wstring &verb, const std::wstring &arg) {
                 }
             }
         }
+    } else if (verb == L"mdown" || verb == L"mmove" || verb == L"mup") {
+        // the left button at "x,y" (client DIPs; mdown also ",ctrl" or ",shift"), through the window's own handlers
+        float x = 0, y = 0;
+        swscanf(arg.c_str(), L"%f,%f", &x, &y);
+        if (make_target(w)) draw_frame(w); // the regions a press finds exist once drawn
+        if (verb == L"mdown")
+            on_down(w, x, y, false, false, MK_LBUTTON | (arg.find(L"ctrl") != std::wstring::npos ? MK_CONTROL : 0) | (arg.find(L"shift") != std::wstring::npos ? MK_SHIFT : 0));
+        else if (verb == L"mmove") on_move(w, x, y);
+        else on_up(w, x, y, false);
+    } else if (verb == L"selcount") { // into the log, for logcheck: "selcount <arg>: N selected, first <name>"
+        std::vector<int> s = selected(v);
+        log_line("selcount " + utf8(arg) + ": " + std::to_string(s.size()) + " selected, first " + (s.empty() ? std::string("-") : utf8(v.all[s[0]].name)) +
+                 ", scroll " + std::to_string((int)v.scroll));
     } else if (verb == L"size") {
         int cw = 0, ch = 0;
         swscanf(arg.c_str(), L"%dx%d", &cw, &ch);
