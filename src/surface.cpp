@@ -3,6 +3,7 @@
 #include "util.h"
 #include <wincodec.h>
 #include <algorithm>
+#include <cstring>
 #include <vector>
 
 namespace {
@@ -251,4 +252,41 @@ bool icon_pixels(HICON icon, Thumb &t) {
         t.px.clear();
     }
     return ok;
+}
+
+bool image_pixels(const std::wstring &path, int px, Thumb &t) {
+    Com<IWICImagingFactory> wic;
+    if (px <= 0 || path.empty() || FAILED(CoCreateInstance(CLSID_WICImagingFactory, NULL, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(wic.put())))) return false;
+    Com<IWICBitmapDecoder> dec;
+    if (FAILED(wic->CreateDecoderFromFilename(path.c_str(), NULL, GENERIC_READ, WICDecodeMetadataCacheOnDemand, dec.put()))) return false;
+    // an .ico has a frame per size: the smallest one at least px wide, else the biggest
+    UINT n = 0, bw = 0, bh = 0;
+    dec->GetFrameCount(&n);
+    Com<IWICBitmapFrameDecode> best;
+    for (UINT i = 0; i < n; i++) {
+        Com<IWICBitmapFrameDecode> f;
+        UINT w = 0, h = 0;
+        if (FAILED(dec->GetFrame(i, f.put())) || FAILED(f->GetSize(&w, &h)) || !w || !h) continue;
+        if (!best || (bw < (UINT)px ? w > bw : w >= (UINT)px && w < bw)) {
+            best = std::move(f);
+            bw = w;
+            bh = h;
+        }
+    }
+    if (!best) return false;
+    float k = std::min((float)px / bw, (float)px / bh);
+    UINT w = std::max(1u, std::min((UINT)px, (UINT)(bw * k + 0.5f))), h = std::max(1u, std::min((UINT)px, (UINT)(bh * k + 0.5f)));
+    Com<IWICBitmapScaler> sc;
+    Com<IWICFormatConverter> cv;
+    if (FAILED(wic->CreateBitmapScaler(sc.put())) || FAILED(sc->Initialize(best, w, h, WICBitmapInterpolationModeFant)) ||
+        FAILED(wic->CreateFormatConverter(cv.put())) ||
+        FAILED(cv->Initialize(sc, GUID_WICPixelFormat32bppPBGRA, WICBitmapDitherTypeNone, NULL, 0, WICBitmapPaletteTypeCustom)))
+        return false;
+    std::vector<uint32_t> img((size_t)w * h);
+    if (FAILED(cv->CopyPixels(NULL, w * 4, (UINT)(img.size() * 4), (BYTE *)img.data()))) return false;
+    t.w = t.h = px; // square, the picture in the middle: drawn into a square it keeps its proportions
+    t.px.assign((size_t)px * px, 0);
+    UINT ox = (px - w) / 2, oy = (px - h) / 2;
+    for (UINT y = 0; y < h; y++) memcpy(&t.px[(size_t)(y + oy) * px + ox], &img[(size_t)y * w], w * 4);
+    return true;
 }

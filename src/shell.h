@@ -12,6 +12,7 @@ struct Thumb;
 int shell_main(const std::wstring &cmd, bool quit, DWORD restarted); // the process (or a command for the running one)
 int shell_quit_running();           // the installer's --quit: 10 if a shell was running and quit (11 if it is stuck), 0 if none
 void shell_relaunch_after_update(); // --updated: the shell comes back if the update closed it
+void shell_settings_changed();      // the taskbar's settings were saved (taskbarset.cpp): the running shell reads them again
 
 // between shell.cpp and start.cpp
 const uint64_t kGenBar = 1, kGenStart = 2; // whose icon a Thumb is (thumbs_request's gen)
@@ -25,6 +26,9 @@ void shell_launch(const std::wstring &target, const std::wstring &args = L"");
 HMONITOR shell_primary();
 UINT shell_monitor_dpi(HMONITOR mon);
 RECT shell_bar_rect(HMONITOR mon); // pixels: where the monitor's taskbar is (or would be)
+// The Start button is not at its bar's left end (centered with the apps): true, and its middle in pixels (Start
+// opens above it).
+bool shell_start_button(HMONITOR mon, int *center_x);
 
 std::wstring shell_process_path(DWORD pid);
 bool shell_fullscreen(HMONITOR mon); // a fullscreen app (a game, a video) is in front there

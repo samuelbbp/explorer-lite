@@ -49,6 +49,11 @@ int conf_int(const char *key, int def) {
     return end && end != v.c_str() ? (int)n : def;
 }
 
+void conf_reload() {
+    g_loaded = false;
+    g_lines.clear();
+}
+
 void conf_set(const char *key, const std::string &value) {
     load();
     // anything another writer (idioma.cpp) wrote since it was read: re-read before saving
