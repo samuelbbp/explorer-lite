@@ -1,0 +1,104 @@
+# The marquee: a drag from empty space selects what the rectangle touches (plain replaces, Ctrl toggles, Shift adds),
+# a click there without moving clears, Esc restores, the row's empty part starts one too, and it scrolls past the edge.
+# The window is 1180x720 DIPs: the list starts at y 104, rows of 28 (file1 105-131, file2 133-159, file3 161-187).
+conf language=en
+start --tray
+sleep 2000
+send
+sleep 2000
+cmd size 1180x720
+make {dir}\mq
+cmd go {dir}\mq
+sleep 1500
+# plain, from below the last row up into file2: file2 and file3
+cmd mdown 600,300
+cmd mmove 600,140
+cmd selcount plain
+shot marquee-plain
+cmd mup 600,140
+cmd selcount plain-up
+logcheck selcount plain: 2 selected, first file2.txt
+logcheck selcount plain-up: 2 selected, first file2.txt
+# a click on empty space without moving: nothing selected
+cmd mdown 600,300
+cmd mup 600,300
+cmd selcount click
+logcheck selcount click: 0 selected
+# Ctrl toggles over what was selected: file3, then file2..file3 crossed, leaves file2
+cmd select file3.txt
+cmd mdown 600,300,ctrl
+cmd mmove 600,140
+cmd mup 600,140
+cmd selcount ctrl
+logcheck selcount ctrl: 1 selected, first file2.txt
+# Shift adds: file1, then file3 crossed
+cmd select file1.txt
+cmd mdown 600,300,shift
+cmd mmove 600,170
+cmd mup 600,170
+cmd selcount shift
+logcheck selcount shift: 2 selected, first file1.txt
+# Esc during the drag: back to file1 alone
+cmd select file1.txt
+cmd mdown 600,300
+cmd mmove 600,110
+cmd selcount esc-during
+cmd key 27
+cmd selcount esc
+cmd mup 600,110
+cmd selcount esc-after
+logcheck selcount esc-during: 3 selected
+logcheck selcount esc: 1 selected, first file1.txt
+logcheck selcount esc-after: 1 selected, first file1.txt
+# the row's empty part (file1's date): a click selects the row, a drag is a marquee
+cmd select file3.txt
+cmd mdown 800,120
+cmd mup 800,120
+cmd selcount row-click
+logcheck selcount row-click: 1 selected, first file1.txt
+cmd mdown 800,120
+cmd mmove 800,170
+cmd mup 800,170
+cmd selcount row-drag
+logcheck selcount row-drag: 3 selected, first file1.txt
+# the name: a click selects the row (and is where a drag of the files starts)
+cmd mdown 250,148
+cmd mup 250,148
+cmd selcount name-click
+logcheck selcount name-click: 1 selected, first file2.txt
+# Large icons: from the empty space right of the tiles down-left over them
+cmd view icons
+sleep 500
+cmd mdown 1120,130
+cmd mmove 300,200
+cmd selcount icons
+logcheck selcount icons: 3 selected
+cmd mup 300,200
+cmd view details
+# a big folder: held below the list, it scrolls and keeps selecting
+cmd go C:\Windows\System32
+sleep 3000
+cmd mdown 800,120
+cmd mmove 800,760
+sleep 1500
+cmd selcount autoscroll
+shot marquee-autoscroll
+cmd mup 800,760
+cmd selcount autoscroll-up
+# how it looks, mid-drag
+cmd go C:\Windows\System32
+sleep 3000
+cmd mdown 1100,200
+cmd mmove 520,420
+shot marquee-details-dark
+cmd mup 520,420
+cmd view icons
+sleep 2000
+cmd mdown 1120,130
+cmd mmove 480,460
+sleep 1000
+shot marquee-icons-dark
+cmd mup 480,460
+cmd closeall
+sleep 1000
+stop

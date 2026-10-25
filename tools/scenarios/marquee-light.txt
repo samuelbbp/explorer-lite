@@ -1,0 +1,24 @@
+# The marquee in the light theme, mid-drag: Details and Large icons.
+conf language=en
+conf theme=light
+start --tray
+sleep 2000
+send
+sleep 2000
+cmd size 1180x720
+cmd go C:\Windows\System32
+sleep 3000
+cmd mdown 1100,200
+cmd mmove 520,420
+shot marquee-details-light
+cmd mup 520,420
+cmd view icons
+sleep 2000
+cmd mdown 1120,130
+cmd mmove 480,460
+sleep 1000
+shot marquee-icons-light
+cmd mup 480,460
+cmd closeall
+sleep 1000
+stop
