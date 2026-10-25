@@ -6,6 +6,7 @@
 #include "thumbs.h"
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 struct Surface {
     HWND hwnd = NULL;
@@ -23,8 +24,15 @@ inline bool surf_inside(const D2D1_RECT_F &r, float x, float y) { return x >= r.
 
 // Paints the window: BeginPaint/EndPaint, the target made if needed, draw(ctx) between BeginDraw and EndDraw.
 void surf_paint(Surface &s, void (*draw)(void *ctx), void *ctx);
-// The same frame into a PNG (tests: nothing has to be on the screen).
-bool surf_shot(Surface &s, const std::wstring &png, void (*draw)(void *ctx), void *ctx);
+// The same frame into a PNG (tests: nothing has to be on the screen). Several surfaces: one under the other, each at
+// its own DPI (the taskbars of every monitor in one picture).
+struct ShotPart {
+    Surface *s;
+    void (*draw)(void *ctx);
+    void *ctx;
+};
+bool surf_shot(const std::vector<ShotPart> &parts, const std::wstring &png);
+inline bool surf_shot(Surface &s, const std::wstring &png, void (*draw)(void *ctx), void *ctx) { return surf_shot({ { &s, draw, ctx } }, png); }
 void surf_formats(Surface &s);   // the text formats, again after a DPI change is not needed (DIPs)
 void surf_free(Surface &s);      // target, bitmaps and formats
 

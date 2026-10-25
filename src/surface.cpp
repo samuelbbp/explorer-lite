@@ -1,6 +1,7 @@
 // surface.cpp: see surface.h.
 #include "surface.h"
 #include <wincodec.h>
+#include <algorithm>
 #include <vector>
 
 namespace {
@@ -68,39 +69,54 @@ void surf_paint(Surface &s, void (*draw)(void *), void *ctx) {
     }
 }
 
-bool surf_shot(Surface &s, const std::wstring &png, void (*draw)(void *), void *ctx) {
-    if (!g_d2d) return false;
+bool surf_shot(const std::vector<ShotPart> &parts, const std::wstring &png) {
+    if (!g_d2d || parts.empty()) return false;
     IWICImagingFactory *wic = nullptr;
     CoCreateInstance(CLSID_WICImagingFactory, NULL, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic));
     if (!wic) return false;
-    RECT rc;
-    GetClientRect(s.hwnd, &rc);
+    LONG width = 0, height = 0;
+    for (const ShotPart &p : parts) {
+        RECT rc;
+        GetClientRect(p.s->hwnd, &rc);
+        width = std::max(width, rc.right);
+        height += rc.bottom;
+    }
     IWICBitmap *bmp = nullptr;
     ID2D1RenderTarget *rt = nullptr;
     ID2D1SolidColorBrush *br = nullptr;
     bool ok = false;
-    D2D1_RENDER_TARGET_PROPERTIES p = D2D1::RenderTargetProperties(D2D1_RENDER_TARGET_TYPE_SOFTWARE,
-                                                                    D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), (float)s.dpi,
-                                                                    (float)s.dpi);
-    if (SUCCEEDED(wic->CreateBitmap(rc.right, rc.bottom, GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnLoad, &bmp)) &&
-        SUCCEEDED(g_d2d->CreateWicBitmapRenderTarget(bmp, p, &rt)) && SUCCEEDED(rt->CreateSolidColorBrush(color(kText), &br))) {
-        // the icons belong to the window's target: a set of their own for this one
-        std::unordered_map<const Thumb *, ID2D1Bitmap *> bmps;
-        bmps.swap(s.bmps);
-        ID2D1RenderTarget *dc = s.dc;
-        ID2D1SolidColorBrush *sbr = s.br;
-        s.dc = rt;
-        s.br = br;
-        s.shot = true;
+    // at 96 DPI: each part is scaled by its own DPI and moved down below the one before
+    D2D1_RENDER_TARGET_PROPERTIES props = D2D1::RenderTargetProperties(D2D1_RENDER_TARGET_TYPE_SOFTWARE,
+                                                                        D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), 96, 96);
+    if (width > 0 && height > 0 && SUCCEEDED(wic->CreateBitmap(width, height, GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnLoad, &bmp)) &&
+        SUCCEEDED(g_d2d->CreateWicBitmapRenderTarget(bmp, props, &rt)) && SUCCEEDED(rt->CreateSolidColorBrush(color(kText), &br))) {
         rt->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
         rt->BeginDraw();
-        draw(ctx);
+        rt->Clear(D2D1::ColorF(0, 0, 0, 0));
+        float y = 0;
+        for (const ShotPart &p : parts) {
+            Surface &s = *p.s;
+            // the icons belong to the window's target: a set of their own for this one
+            std::unordered_map<const Thumb *, ID2D1Bitmap *> bmps;
+            bmps.swap(s.bmps);
+            ID2D1RenderTarget *dc = s.dc;
+            ID2D1SolidColorBrush *sbr = s.br;
+            s.dc = rt;
+            s.br = br;
+            s.shot = true;
+            float k = surf_scale(s);
+            rt->SetTransform(D2D1::Matrix3x2F::Scale(k, k) * D2D1::Matrix3x2F::Translation(0, y));
+            p.draw(p.ctx);
+            s.shot = false;
+            for (auto &kv : s.bmps) release(kv.second);
+            s.bmps.swap(bmps);
+            s.dc = dc;
+            s.br = sbr;
+            RECT rc;
+            GetClientRect(s.hwnd, &rc);
+            y += rc.bottom;
+        }
         ok = SUCCEEDED(rt->EndDraw());
-        s.shot = false;
-        for (auto &kv : s.bmps) release(kv.second);
-        s.bmps.swap(bmps);
-        s.dc = dc;
-        s.br = sbr;
     }
     IWICStream *st = nullptr;
     IWICBitmapEncoder *enc = nullptr;

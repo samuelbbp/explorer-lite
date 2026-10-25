@@ -87,6 +87,45 @@ void add_shortcuts(const std::wstring &dir, std::vector<App> &out, std::vector<s
     FindClose(h);
 }
 
+// The last list, saved: Start shows it at once after a restart (the Apps folder takes seconds, cold, after sign-in).
+std::wstring cache_path() { return data_dir() + L"\\apps.txt"; }
+
+void save_cache() {
+    std::wstring text;
+    for (const App &a : g_apps) text += a.name + L"\t" + a.target + L"\n";
+    std::string bytes = utf8(text);
+    std::wstring tmp = cache_path() + L".tmp";
+    HANDLE f = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (f == INVALID_HANDLE_VALUE) return;
+    DWORD put = 0;
+    WriteFile(f, bytes.data(), (DWORD)bytes.size(), &put, NULL);
+    CloseHandle(f);
+    if (put == bytes.size()) MoveFileExW(tmp.c_str(), cache_path().c_str(), MOVEFILE_REPLACE_EXISTING);
+    else DeleteFileW(tmp.c_str());
+}
+
+void load_cache() {
+    HANDLE f = CreateFileW(cache_path().c_str(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (f == INVALID_HANDLE_VALUE) return;
+    std::string bytes;
+    char buf[8192];
+    DWORD got = 0;
+    while (ReadFile(f, buf, sizeof(buf), &got, NULL) && got && bytes.size() < 4 * 1024 * 1024) bytes.append(buf, got);
+    CloseHandle(f);
+    std::wstring text = wide(bytes);
+    size_t pos = 0;
+    while (pos < text.size()) {
+        size_t end = text.find(L'\n', pos);
+        if (end == std::wstring::npos) end = text.size();
+        size_t tab = text.find(L'\t', pos);
+        if (tab != std::wstring::npos && tab < end && tab > pos) {
+            std::wstring name = text.substr(pos, tab - pos);
+            g_apps.push_back({ name, text.substr(tab + 1, end - tab - 1), lower(name) });
+        }
+        pos = end + 1;
+    }
+}
+
 DWORD WINAPI list_thread(void *to) {
     CoInitializeEx(NULL, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     double t0 = now_ms();
@@ -118,6 +157,8 @@ DWORD WINAPI list_thread(void *to) {
         CoTaskMemFree(p);
     }
     std::stable_sort(out->begin(), out->end(), [](const App &a, const App &b) { return a.key < b.key; });
+    // the Apps folder lists some apps twice (a shortcut per user and for all users): one row per name
+    out->erase(std::unique(out->begin(), out->end(), [](const App &a, const App &b) { return a.key == b.key; }), out->end());
     log_line("start: " + std::to_string(out->size()) + " apps listed in " + std::to_string((int)(now_ms() - t0)) + " ms");
     if (!PostMessageW((HWND)to, WM_APP_APPS, 0, (LPARAM)out)) delete out;
     CoUninitialize();
@@ -189,7 +230,7 @@ std::wstring user_name() {
 void draw_start(void *ctx) {
     StartWin *w = (StartWin *)ctx;
     Surface &s = w->s;
-    s.dc->Clear(color(kBg));
+    surf_fill(s, D2D1::RectF(0, 0, kW, kH), kBg);
     // the search box: the edit control sits in it (a shot draws its text instead)
     D2D1_RECT_F sr = search_rect();
     surf_round(s, sr, 6, kPane);
@@ -382,15 +423,6 @@ LRESULT CALLBACK start_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             redraw(w);
         }
         return 0;
-    case WM_APP_APPS: {
-        auto *apps = (std::vector<App> *)lp;
-        g_apps.swap(*apps);
-        delete apps;
-        g_listing = false;
-        filter(w);
-        redraw(w);
-        return 0;
-    }
     case WM_MOUSEMOVE: {
         int i = hit(w, GET_X_LPARAM(lp) / s, GET_Y_LPARAM(lp) / s);
         if (i != w->hover) {
@@ -442,6 +474,33 @@ LRESULT CALLBACK start_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
 
 bool start_is_open() { return g_st != nullptr; }
 
+void start_list_probe() { list_thread(NULL); }
+
+void start_prepare() {
+    if (g_listing) return;
+    if (g_apps.empty()) load_cache();
+    g_listing = true;
+    HANDLE t = CreateThread(NULL, 0, list_thread, shell_host(), 0, NULL);
+    if (t) CloseHandle(t);
+    else g_listing = false;
+}
+
+void start_on_apps(void *list) {
+    auto *apps = (std::vector<App> *)list;
+    g_listing = false;
+    if (apps->empty() && !g_apps.empty()) { // the Apps folder failed: the last list stays
+        delete apps;
+        return;
+    }
+    g_apps.swap(*apps);
+    delete apps;
+    save_cache();
+    if (g_st) {
+        filter(g_st);
+        redraw(g_st);
+    }
+}
+
 void start_toggle(HMONITOR mon) {
     if (g_st) start_close();
     else start_open(mon, false);
@@ -489,11 +548,12 @@ void start_open(HMONITOR mon, bool sticky) {
     SetWindowSubclass(w->search, edit_proc, 1, (DWORD_PTR)w);
     edit_style(w);
     place_edit(w);
+    if (g_apps.empty()) load_cache();
     filter(w);
     // a new list each time (apps come and go); the last one shows meanwhile
     if (!g_listing) {
         g_listing = true;
-        HANDLE t = CreateThread(NULL, 0, list_thread, w->s.hwnd, 0, NULL);
+        HANDLE t = CreateThread(NULL, 0, list_thread, shell_host(), 0, NULL);
         if (t) CloseHandle(t);
         else g_listing = false;
     }
@@ -518,8 +578,6 @@ void start_close() {
     if (w->font) DeleteObject(w->font);
     if (w->edit_brush) DeleteObject(w->edit_brush);
     delete w;
-    // a list still being made is dropped when it arrives (its window is gone)
-    g_listing = false;
     for (HWND b = FindWindowExW(NULL, NULL, (L"ExplorerLiteTaskbar" + instance_suffix()).c_str(), NULL); b;
          b = FindWindowExW(NULL, b, (L"ExplorerLiteTaskbar" + instance_suffix()).c_str(), NULL))
         InvalidateRect(b, NULL, FALSE);

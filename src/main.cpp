@@ -17,6 +17,7 @@
 //                                      Everything only answers windows on its own desktop, and this needs none)
 //   explorer-lite.exe --shell          the shell: a taskbar per monitor and Start (shell.cpp), a process of its own;
 //                                      with --cmd or --quit, a command for the running shell
+//   explorer-lite.exe --apps           the apps Start would list, to the log (tests)
 //   --instance <name>                  its own data folder, mutex and window classes (tests)
 #include "app.h"
 #include <shellapi.h>
@@ -50,7 +51,7 @@ std::wstring run_value() { return L"explorer-lite" + instance_suffix(); }
 // --- the command line ---------------------------------------------------------------------------
 
 struct Command {
-    bool tray = false, tasks = false, quit = false, updated = false, unregister = false, everything = false, shell = false;
+    bool tray = false, tasks = false, quit = false, updated = false, unregister = false, everything = false, shell = false, apps = false;
     DWORD restarted = 0; // --restarted <pid>: the shell that crashed (shell.cpp)
     std::wstring path, cmd, text;
 };
@@ -65,6 +66,7 @@ Command parse(int argc, wchar_t **argv) {
         else if (a == L"--updated") c.updated = true;
         else if (a == L"--unregister") c.unregister = true;
         else if (a == L"--shell") c.shell = true;
+        else if (a == L"--apps") c.apps = true;
         else if (a == L"--restarted" && i + 1 < argc) c.restarted = (DWORD)_wtoi(argv[++i]);
         else if (a == L"--instance" && i + 1 < argc) set_instance(argv[++i]);
         else if (a == L"--cmd" && i + 1 < argc) c.cmd = argv[++i];
@@ -570,6 +572,10 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     Command cmd = parse(argc, argv);
     LocalFree(argv);
     if (cmd.everything) return everything_probe(cmd);
+    if (cmd.apps) {
+        start_list_probe();
+        return 0;
+    }
     if (cmd.unregister) {
         set_startup(false);
         folders_set(false);

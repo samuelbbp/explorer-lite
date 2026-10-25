@@ -47,3 +47,6 @@ bool start_shot(const std::wstring &png);
 void start_command(const std::wstring &verb, const std::wstring &arg); // search <text>, key <vk>
 void start_on_icon(Thumb *t); // an icon Start asked for (takes it)
 void start_theme_changed();
+void start_prepare();            // the list of apps made in the background (the saved one loaded first)
+void start_on_apps(void *list);  // WM_APP_APPS reached the shell's window: the new list (takes it)
+void start_list_probe(); // --apps: the list Start would show, into the log (tests: no window needed)

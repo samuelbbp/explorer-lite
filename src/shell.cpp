@@ -32,7 +32,7 @@ namespace {
 
 // layout, in DIPs
 const float kBarH = 40, kStartW = 44, kBtnMax = 200, kBtnMin = 44, kIcon = 20, kClockW = 92, kTitleMin = 96;
-const UINT_PTR kTimerScan = 1, kTimerClock = 2, kTimerStartup = 3, kTimerDisplay = 4;
+const UINT_PTR kTimerScan = 1, kTimerClock = 2, kTimerStartup = 3, kTimerDisplay = 4, kTimerApps = 5;
 const int kIconPx = 32; // icons asked for at this size, drawn at kIcon DIPs
 
 enum Mode {
@@ -440,7 +440,7 @@ void draw_bar(void *ctx) {
     Bar *b = (Bar *)ctx;
     Surface &s = b->s;
     D2D1_RECT_F c = bar_client(b);
-    s.dc->Clear(color(kPane));
+    surf_fill(s, c, kPane); // not Clear: a shot draws every bar on one bitmap
     surf_fill(s, D2D1::RectF(0, 0, c.right, 1), kLine);
     for (int i = 0; i < (int)b->btns.size(); i++) {
         const Btn &bt = b->btns[i];
@@ -890,8 +890,10 @@ void command(const std::wstring &line) {
     if (what != L"cmd") return;
     size_t sp = rest.find(L' ');
     std::wstring verb = rest.substr(0, sp), arg = sp == std::wstring::npos ? L"" : rest.substr(sp + 1);
-    if (verb == L"shot") { // the main monitor's bar
-        bool ok = !g_bars.empty() && surf_shot(g_bars[0]->s, arg, draw_bar, g_bars[0]);
+    if (verb == L"shot") { // every bar, the main monitor's first, one under the other
+        std::vector<ShotPart> parts;
+        for (Bar *b : g_bars) parts.push_back({ &b->s, draw_bar, b });
+        bool ok = surf_shot(parts, arg);
         log_line(std::string("shell shot ") + (ok ? "ok" : "failed"));
     } else if (verb == L"startshot") log_line(std::string("start shot ") + (start_shot(arg) ? "ok" : "failed"));
     else if (verb == L"start") start_open(shell_primary(), true);
@@ -899,7 +901,12 @@ void command(const std::wstring &line) {
     else if (verb == L"filtertest") filter_test();
     else if (verb == L"tasks") { // what the bars show, into the log
         std::string s = "shell tasks:";
-        for (const Task &t : g_tasks) s += " [" + utf8(t.title) + "]";
+        for (const Task &t : g_tasks) {
+            int bar = -1;
+            for (int i = 0; i < (int)g_bars.size(); i++)
+                if (g_bars[i]->mon == t.mon) bar = i;
+            s += " [" + utf8(t.title) + ", bar " + std::to_string(bar) + "]";
+        }
         log_line(s);
     } else start_command(verb, arg);
 }
@@ -927,6 +934,10 @@ LRESULT CALLBACK shell_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             if (t) CloseHandle(t);
             break;
         }
+        case kTimerApps: // Start's apps, while nobody waits for them: cold, after sign-in, the Apps folder takes seconds
+            KillTimer(h, kTimerApps);
+            start_prepare();
+            break;
         case kTimerDisplay:
             KillTimer(h, kTimerDisplay);
             bars_create();
@@ -934,6 +945,7 @@ LRESULT CALLBACK shell_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             break;
         }
         return 0;
+    case WM_APP_APPS: start_on_apps((void *)lp); return 0;
     case WM_APP_KEYS:
         if (wp == KEY_START) {
             HWND f = GetForegroundWindow();
@@ -1168,6 +1180,7 @@ int shell_main(const std::wstring &cmd, bool quit_it, DWORD restarted) {
     HWND f = GetForegroundWindow();
     g_active = f ? GetAncestor(f, GA_ROOTOWNER) : NULL;
     clock_timer();
+    SetTimer(g_shell, kTimerApps, 4000, NULL);
     // the Win key: as the session's shell, or when asked for (conf start_key=1); never in a test instance
     if (g_mode == M_SHELL || (g_mode == M_APPBAR && conf_get("start_key") == "1")) keys_start_win(g_shell, WM_APP_KEYS);
     // what starts with Windows: as the session's shell, once per sign-in; a test lists it without running anything
