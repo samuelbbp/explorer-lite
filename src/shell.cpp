@@ -68,6 +68,7 @@ struct Bar {
     RECT mrc = {};          // the monitor, pixels
     RECT rc = {};           // the bar, pixels
     bool primary = false, appbar = false, low = false; // low: a fullscreen app is in front, the bar is not topmost
+    bool placed = false;
     std::vector<Btn> btns;
     int hover = -1, press = -1;
     bool tracking = false;
@@ -289,6 +290,7 @@ void CALLBACK on_event(HWINEVENTHOOK, DWORD ev, HWND h, LONG obj, LONG child, DW
     case EVENT_SYSTEM_MINIMIZESTART:
     case EVENT_SYSTEM_MINIMIZEEND: redraw_all(); return;
     case EVENT_OBJECT_LOCATIONCHANGE:
+        if (h == GetForegroundWindow()) check_fullscreen(); // F11 in place: no foreground change
         if (Task *t = task_of(h)) { // moved to another monitor: to that one's bar
             HMONITOR m = MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST);
             if (m != t->mon) {
@@ -594,6 +596,8 @@ void place(Bar *b) {
         abd.rc = b->rc;
         SHAppBarMessage(ABM_QUERYPOS, &abd);
         abd.rc.top = abd.rc.bottom - h; // it only moves the edge it was asked about
+        // where it already is: no SETPOS, whose notice to the other bars would bounce back here (three bars, one edge)
+        if (b->placed && EqualRect(&abd.rc, &b->rc)) return;
         SHAppBarMessage(ABM_SETPOS, &abd);
         b->rc = abd.rc;
     } else if (g_mode == M_SHELL) {
@@ -601,6 +605,7 @@ void place(Bar *b) {
         wa.bottom = b->rc.top;
         SystemParametersInfoW(SPI_SETWORKAREA, 0, &wa, SPIF_SENDCHANGE);
     }
+    b->placed = true;
     SetWindowPos(b->s.hwnd, b->low ? HWND_NOTOPMOST : HWND_TOPMOST, b->rc.left, b->rc.top, b->rc.right - b->rc.left, b->rc.bottom - b->rc.top,
                  SWP_NOACTIVATE | SWP_SHOWWINDOW);
     layout(b);
@@ -899,6 +904,7 @@ void command(const std::wstring &line) {
     else if (verb == L"start") start_open(shell_primary(), true);
     else if (verb == L"startclose") start_close();
     else if (verb == L"filtertest") filter_test();
+    else if (verb == L"crash" && !shell_real()) *(volatile int *)nullptr = 0; // tests: the restart after a crash
     else if (verb == L"tasks") { // what the bars show, into the log
         std::string s = "shell tasks:";
         for (const Task &t : g_tasks) {
@@ -1121,6 +1127,7 @@ int shell_quit_running() {
 void shell_relaunch_after_update() {
     if (GetFileAttributesW(restart_marker().c_str()) == INVALID_FILE_ATTRIBUTES) return;
     DeleteFileW(restart_marker().c_str());
+    log_line("shell: started again after the update");
     shell_launch(exe_path(), L"--shell");
 }
 
