@@ -20,6 +20,12 @@ png settingsshot settings-dark
 cmd settingsclose
 sleep 3000
 mem resident-after-settings
+# again: what stays after the first time (thread pool, caches) must not grow with each opening
+send --taskbar-settings
+sleep 2000
+cmd settingsclose
+sleep 3000
+mem resident-after-second
 send C:\Windows
 sleep 1500
 send --tasks
