@@ -7,6 +7,7 @@
 #include <d2d1.h>
 #include <dwrite.h>
 #include <string>
+#include <vector>
 
 struct TasksView;
 typedef void (*IconFn)(void *ctx, int index, float x, float y, float size);
@@ -23,3 +24,13 @@ int tasks_row_at(TasksView *t, float x, float y);   // what is under the mouse (
 void tasks_click(TasksView *t, HWND wnd, float x, float y, bool dbl, bool right);
 bool tasks_key(TasksView *t, HWND wnd, WPARAM key);
 void tasks_wheel(TasksView *t, int delta);
+
+// What starts with Windows: the Run keys (HKCU, HKLM 64 and 32-bit) and the Startup folders, with Task Manager's
+// enabled state (StartupApproved). The Startup apps page lists them; the shell runs them at sign-in (shell.cpp).
+struct StartupEntry {
+    std::wstring name, command, where;  // command: a command line (Run keys) or the file's path (Startup folders)
+    bool enabled = true, editable = false, folder = false;
+    HKEY approved_root = NULL;
+    std::wstring approved_key; // StartupApproved\Run or \StartupFolder
+};
+std::vector<StartupEntry> startup_entries();

@@ -12,6 +12,10 @@ UINT g_msg;
 DWORD g_thread_id;
 HANDLE g_thread;
 DWORD g_swallow_up; // the key whose press was taken: its release is taken too
+bool g_shortcuts;   // Win+E and Ctrl+Shift+Esc (the resident)
+bool g_win;         // the Win key alone (the shell)
+bool g_win_down, g_win_combo; // Win is held; another key went down meanwhile (also an injected one: the resident's
+                              // hook swallows Win+E's E and sends 0xE8, so this hook may never see the E)
 
 bool down(int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; }
 
@@ -29,7 +33,31 @@ LRESULT CALLBACK hook(int code, WPARAM wp, LPARAM lp) {
     if (code == HC_ACTION) {
         auto *k = (KBDLLHOOKSTRUCT *)lp;
         bool press = wp == WM_KEYDOWN || wp == WM_SYSKEYDOWN, release = wp == WM_KEYUP || wp == WM_SYSKEYUP;
-        if (!(k->flags & LLKHF_INJECTED)) {
+        bool win_key = k->vkCode == VK_LWIN || k->vkCode == VK_RWIN;
+        if (g_win) {
+            if (press && win_key && !(k->flags & LLKHF_INJECTED)) {
+                if (!g_win_down) g_win_down = true, g_win_combo = false;
+            } else if (press && g_win_down) {
+                g_win_combo = true;
+            } else if (release && win_key && g_win_down && !(k->flags & LLKHF_INJECTED)) {
+                g_win_down = false;
+                // explorer-lite hung: the key stays Windows'
+                if (!g_win_combo && !IsHungAppWindow(g_host)) {
+                    // the release is taken and sent again after the unused key: what is sent from here arrives
+                    // after the event being decided, so Windows has to see the key before it sees Win go up
+                    INPUT in[3] = {};
+                    for (INPUT &i : in) i.type = INPUT_KEYBOARD;
+                    in[0].ki.wVk = in[1].ki.wVk = 0xE8;
+                    in[1].ki.dwFlags = KEYEVENTF_KEYUP;
+                    in[2].ki.wVk = (WORD)k->vkCode;
+                    in[2].ki.dwFlags = KEYEVENTF_KEYUP | KEYEVENTF_EXTENDEDKEY;
+                    SendInput(3, in, sizeof(INPUT));
+                    PostMessageW(g_host, g_msg, KEY_START, 0);
+                    return 1;
+                }
+            }
+        }
+        if (g_shortcuts && !(k->flags & LLKHF_INJECTED)) {
             if (release && k->vkCode == g_swallow_up) {
                 g_swallow_up = 0;
                 return 1;
@@ -55,7 +83,7 @@ LRESULT CALLBACK hook(int code, WPARAM wp, LPARAM lp) {
 // the hook lives on its own thread: Windows waits for it on every key, so it never queues behind a window's paint
 DWORD WINAPI hook_thread(void *) {
     HHOOK h = SetWindowsHookExW(WH_KEYBOARD_LL, hook, GetModuleHandleW(NULL), 0);
-    log_line(h ? "keys: Win+E and Ctrl+Shift+Esc taken" : "keys: the hook failed (" + std::to_string(GetLastError()) + ")");
+    log_line(h ? (g_win ? "keys: the Win key taken (Start)" : "keys: Win+E and Ctrl+Shift+Esc taken") : "keys: the hook failed (" + std::to_string(GetLastError()) + ")");
     MSG m;
     while (GetMessageW(&m, NULL, 0, 0) > 0) DispatchMessageW(&m);
     if (h) UnhookWindowsHookEx(h);
@@ -83,6 +111,15 @@ void keys_start(HWND host, UINT msg) {
     g_host = host;
     g_msg = msg;
     if (g_thread || !keys_on()) return;
+    g_shortcuts = true;
+    g_thread = CreateThread(NULL, 0, hook_thread, NULL, 0, &g_thread_id);
+}
+
+void keys_start_win(HWND host, UINT msg) {
+    g_host = host;
+    g_msg = msg;
+    if (g_thread) return;
+    g_win = true;
     g_thread = CreateThread(NULL, 0, hook_thread, NULL, 0, &g_thread_id);
 }
 

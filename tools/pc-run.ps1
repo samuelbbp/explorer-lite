@@ -11,7 +11,12 @@
 #   shot <name>        = cmd shot <out>\<name>.png, then waits for the file
 #   sleep <ms>
 #   mem <label>        the resident's working set and private bytes, into results.json
-#   stop               ends the resident (and what it started)
+#   shell <args>       starts the shell (explorer-lite.exe --instance test --shell <args>), not waited for
+#   shellcmd <verb> <arg>   = send --shell --cmd "<verb> <arg>" (a command for the shell)
+#   shellshot <name>   the shell's main taskbar into <out>\<name>.png; startshot <name>: Start (open) the same way
+#   shellmem <label>   the shell's memory, like mem
+#   logcheck <text>    an error unless the log has a line with <text> (what the app checked itself, e.g. filtertest)
+#   stop               ends the resident and the shell (and what they started)
 #   make <dir>         a folder with file1.txt..file3.txt (a sandbox for file operations)
 #   exists <path> / missing <path>   checks, failures go to errors
 #   probe <args>       runs explorer-lite.exe --instance test <args> on the user's desktop (no window: --everything)
@@ -61,7 +66,27 @@ $desk = [TestDesk]::CreateDesktopW($deskName, [IntPtr]::Zero, [IntPtr]::Zero, 0,
 if ($desk -eq [IntPtr]::Zero) { throw 'CreateDesktop failed' }
 $results = [ordered]@{ mem = @(); shots = @(); errors = @() }
 $resident = 0
+$shell = 0
 function Send([string]$a) { [void][TestDesk]::Run($exe, "--instance test $a", $deskName, 20000) }
+# a PNG drawn by the app itself (a --cmd verb that takes the path), waited for
+function Shot([string]$prefix, [string]$verb, [string]$name) {
+    $f = Join-Path $out "$name.png"
+    Remove-Item -Force -ErrorAction SilentlyContinue $f
+    Send "$prefix--cmd `"$verb $f`""
+    for ($t = 0; $t -lt 50 -and -not (Test-Path $f); $t++) { Start-Sleep -Milliseconds 100 }
+    Start-Sleep -Milliseconds 200
+    if (Test-Path $f) { $script:results.shots += "$name.png" } else { $script:results.errors += "no shot $name" }
+}
+function Mem([int]$id, [string]$label, [string]$who) {
+    $p = Get-Process -Id $id -ErrorAction SilentlyContinue
+    if ($p) {
+        $p.Refresh()
+        # Task Manager's «Memory»: the private working set
+        $pf = Get-CimInstance Win32_PerfFormattedData_PerfProc_Process -Filter "IDProcess=$id" -ErrorAction SilentlyContinue
+        $script:results.mem += [ordered]@{ label = $label; ws_mb = [math]::Round($p.WorkingSet64 / 1MB, 1); private_ws_mb = [math]::Round($pf.WorkingSetPrivate / 1MB, 1); private_mb = [math]::Round($p.PrivateMemorySize64 / 1MB, 1);
+            threads = $p.Threads.Count; handles = $p.HandleCount; cpu_s = [math]::Round($p.TotalProcessorTime.TotalSeconds, 2) }
+    } else { $script:results.errors += "mem $label`: the $who is not running" }
+}
 function Mine { @(Get-CimInstance Win32_Process -Filter "Name='explorer-lite.exe'" | Where-Object { $_.ExecutablePath -eq $exe }) }
 try {
     foreach ($line in Get-Content -Encoding UTF8 $Steps) {
@@ -73,24 +98,17 @@ try {
             'start' { $script:resident = [TestDesk]::Run($exe, "--instance test $rest", $deskName, 0) }
             'send' { Send $rest }
             'cmd' { Send "--cmd `"$rest`"" }
-            'shot' {
-                $f = Join-Path $out "$rest.png"
-                Remove-Item -Force -ErrorAction SilentlyContinue $f
-                Send "--cmd `"shot $f`""
-                for ($t = 0; $t -lt 50 -and -not (Test-Path $f); $t++) { Start-Sleep -Milliseconds 100 }
-                Start-Sleep -Milliseconds 200
-                if (Test-Path $f) { $results.shots += "$rest.png" } else { $results.errors += "no shot $rest" }
-            }
+            'shot' { Shot '' 'shot' $rest }
             'sleep' { Start-Sleep -Milliseconds ([int]$rest) }
-            'mem' {
-                $p = Get-Process -Id $resident -ErrorAction SilentlyContinue
-                if ($p) {
-                    $p.Refresh()
-                    # Task Manager's «Memory»: the private working set
-                    $pf = Get-CimInstance Win32_PerfFormattedData_PerfProc_Process -Filter "IDProcess=$resident" -ErrorAction SilentlyContinue
-                    $results.mem += [ordered]@{ label = $rest; ws_mb = [math]::Round($p.WorkingSet64 / 1MB, 1); private_ws_mb = [math]::Round($pf.WorkingSetPrivate / 1MB, 1); private_mb = [math]::Round($p.PrivateMemorySize64 / 1MB, 1);
-                        threads = $p.Threads.Count; handles = $p.HandleCount; cpu_s = [math]::Round($p.TotalProcessorTime.TotalSeconds, 2) }
-                } else { $results.errors += "mem $rest`: the resident is not running" }
+            'mem' { Mem $resident $rest 'resident' }
+            'shell' { $script:shell = [TestDesk]::Run($exe, "--instance test --shell $rest", $deskName, 0) }
+            'shellcmd' { Send "--shell --cmd `"$rest`"" }
+            'shellshot' { Shot '--shell ' 'shot' $rest }
+            'startshot' { Shot '--shell ' 'startshot' $rest }
+            'shellmem' { Mem $shell $rest 'shell' }
+            'logcheck' {
+                $log = Join-Path $data 'explorer-lite.log'
+                if (-not ((Test-Path $log) -and (Select-String -Path $log -SimpleMatch -Quiet $rest))) { $results.errors += "not in the log: $rest" }
             }
             'stop' {
                 Send '--quit'

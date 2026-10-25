@@ -1,0 +1,32 @@
+# The shell: a taskbar on each monitor with the open windows (explorer-lite's own, the only ones on the test desktop),
+# two pinned apps and the clock; the window filter checked on real windows of each kind; Start with all apps, then a
+# search typed. The shell's memory alone, with windows, with Start open and after closing it. Nothing is launched.
+conf language=en
+conf pinned=C:\Windows\System32\notepad.exe|C:\Windows\regedit.exe
+start --tray
+sleep 2000
+shell
+sleep 3000
+shellmem shell-alone
+send C:\Windows
+sleep 1500
+send --tasks
+sleep 3000
+shellcmd filtertest
+sleep 1500
+logcheck filtertest: ok
+shellcmd tasks
+sleep 500
+shellmem shell-with-windows
+shellshot bar-dark
+shellcmd start
+sleep 3000
+shellmem shell-start-open
+startshot start-dark
+shellcmd search no
+sleep 1500
+startshot start-search-dark
+shellcmd startclose
+sleep 3000
+shellmem shell-after-start
+stop
