@@ -8,7 +8,7 @@
 //   explorer-lite.exe --quit           asks the running one to save its windows and exit (installer); exit code 10 if
 //                                      there was one, 0 if not
 //   explorer-lite.exe --updated        after an update: reopens the windows that were open
-//   explorer-lite.exe --cmd "<verb> <arg>"   a test command for the running one: shot <png>, go <folder>, search <text>,
+//   explorer-lite.exe --cmd "<verb> <arg>"   a test command for the running one: shot <name>.png (into <data>\shots), go <folder>, search <text>,
 //                                      key <vk>, select <name>, newtab <folder>, tasks, taskpage <n>, size <w>x<h>, closeall,
 //                                      newfolder, rename <name>, copyto|moveto <folder>, delete [permanent], view icons|details
 //   explorer-lite.exe --unregister     undoes what explorer-lite registered for this user (uninstaller): Start
