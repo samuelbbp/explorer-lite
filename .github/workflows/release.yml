@@ -135,7 +135,7 @@ jobs:
             [[ $VERSION != *-* && $GITHUB_REF == refs/heads/main ]] || { echo "::error::bad release $VERSION on $GITHUB_REF"; exit 1; }
             now=$(git ls-remote --tags --refs "https://github.com/$RELEASES_REPO.git" | sed 's#.*refs/tags/##' \
               | { grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' || true; } | sed 's/^v//' | sort -t. -k1,1n -k2,2n -k3,3n | tail -n 1)
-            if [ "v$now" != "$LAST" ] && [ "v$now" != "$TAG" ]; then
+            if [ -n "$now" ] && [ "v$now" != "$LAST" ] && [ "v$now" != "$TAG" ]; then
               echo "::error::$RELEASES_REPO went from $LAST to v$now during the build; not publishing $TAG"
               exit 1
             fi
