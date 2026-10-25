@@ -1094,6 +1094,13 @@ void tray_test() {
     memcpy(q.data() + 16, &me, 4);
     memcpy(q.data() + 20, &uid, 4);
     check(deliver(kTrayIconRect, q) != 0, "icon rectangle");
+    check(deliver(kTrayIconRect, q, 39) == 0, "icon rectangle: short buffer refused");
+    check(deliver(kTrayAppBar, std::vector<BYTE>(63, 0)) == 0, "appbar message: wrong size refused");
+    {
+        std::wstring line = L"cmd\tdesktop"; // an app command sent to the tray: never taken
+        std::vector<BYTE> c((BYTE *)line.data(), (BYTE *)(line.data() + line.size()));
+        check(deliver(kCopyCommand, c) == FALSE, "a command on the tray window refused");
+    }
 
     // ABM_GETTASKBARPOS through shared memory, as SHAppBarMessage passes it
     auto alloc = (PAllocShared)(void *)shlwapi_fn("SHAllocShared", 7);

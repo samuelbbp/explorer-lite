@@ -49,3 +49,6 @@ const std::wstring &instance();
 std::wstring instance_suffix();          // "" or "-<name>": appended to mutex and class names
 std::wstring data_dir();                 // %LOCALAPPDATA%\explorer-lite[-<name>], created on first use
 void log_line(const std::string &line);  // data_dir()\explorer-lite.log
+// Where a test shot goes: data_dir()\shots\<name> (folder created). "" unless `name` is a bare file name ending in
+// .png: a --cmd never writes anywhere else.
+std::wstring shot_path(const std::wstring &name);

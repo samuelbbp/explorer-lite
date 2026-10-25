@@ -69,14 +69,16 @@ $results = [ordered]@{ mem = @(); shots = @(); errors = @() }
 $resident = 0
 $shell = 0
 function Send([string]$a) { [void][TestDesk]::Run($exe, "--instance test $a", $deskName, 20000) }
-# a PNG drawn by the app itself (a --cmd verb that takes the path), waited for
+# a PNG drawn by the app itself (a --cmd verb that takes a file name: it writes only into its data folder's shots),
+# waited for and moved to the results
 function Shot([string]$prefix, [string]$verb, [string]$name) {
     $f = Join-Path $out "$name.png"
-    Remove-Item -Force -ErrorAction SilentlyContinue $f
-    Send "$prefix--cmd `"$verb $f`""
-    for ($t = 0; $t -lt 50 -and -not (Test-Path $f); $t++) { Start-Sleep -Milliseconds 100 }
+    $made = Join-Path $data "shots\$name.png"
+    Remove-Item -Force -ErrorAction SilentlyContinue $f, $made
+    Send "$prefix--cmd `"$verb $name.png`""
+    for ($t = 0; $t -lt 50 -and -not (Test-Path $made); $t++) { Start-Sleep -Milliseconds 100 }
     Start-Sleep -Milliseconds 200
-    if (Test-Path $f) { $script:results.shots += "$name.png" } else { $script:results.errors += "no shot $name" }
+    if (Test-Path $made) { Move-Item -Force $made $f; $script:results.shots += "$name.png" } else { $script:results.errors += "no shot $name" }
 }
 function Mem([int]$id, [string]$label, [string]$who) {
     $p = Get-Process -Id $id -ErrorAction SilentlyContinue

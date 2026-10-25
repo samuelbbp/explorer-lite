@@ -1944,7 +1944,9 @@ void window_close_all() {
 }
 
 // The last used window, drawn into a PNG (tests and screenshots: no screen capture, nothing has to be visible).
-bool window_shot(const std::wstring &png) {
+bool window_shot(const std::wstring &name) {
+    std::wstring png = shot_path(name);
+    if (png.empty()) return false;
     Win *w = nullptr;
     for (Win *x : g_wins)
         if (!w || x->last_used > w->last_used) w = x;

@@ -76,6 +76,16 @@ std::wstring data_dir() {
     return dir;
 }
 
+std::wstring shot_path(const std::wstring &name) {
+    if (name.size() < 5 || name.size() > 100 || _wcsicmp(name.c_str() + name.size() - 4, L".png") != 0) return L"";
+    for (wchar_t ch : name)
+        if (!(iswalnum(ch) || ch == L'-' || ch == L'_' || ch == L'.')) return L"";
+    if (name.find(L"..") != std::wstring::npos) return L"";
+    std::wstring dir = data_dir() + L"\\shots";
+    CreateDirectoryW(dir.c_str(), NULL);
+    return dir + L"\\" + name;
+}
+
 void log_line(const std::string &line) {
     SYSTEMTIME t;
     GetLocalTime(&t);

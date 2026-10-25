@@ -32,7 +32,8 @@ struct ShotPart {
     void (*draw)(void *ctx);
     void *ctx;
 };
-bool surf_shot(const std::vector<ShotPart> &parts, const std::wstring &png);
+// A PNG of the parts, one under the other, named `name` in the shots folder (shot_path; no other path is accepted).
+bool surf_shot(const std::vector<ShotPart> &parts, const std::wstring &name);
 inline bool surf_shot(Surface &s, const std::wstring &png, void (*draw)(void *ctx), void *ctx) { return surf_shot({ { &s, draw, ctx } }, png); }
 void surf_formats(Surface &s);   // the text formats, again after a DPI change is not needed (DIPs)
 void surf_free(Surface &s);      // target, bitmaps and formats

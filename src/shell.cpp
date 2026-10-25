@@ -1038,10 +1038,10 @@ void command(const std::wstring &line) {
     else if (verb == L"start") start_open(shell_primary(), true);
     else if (verb == L"startclose") start_close();
     else if (verb == L"filtertest") filter_test();
-    else if (verb == L"desktop") toggle_desktop(); // Win+D's work, without the key (tests)
-    else if (verb == L"winkey") on_win_key(arg.size() == 1 ? (UINT)towupper(arg[0]) : arg == L"tab" ? VK_TAB : 0);
-    else if (tray_command(verb, arg)) {
-    } else if (verb.compare(0, 6, L"switch") == 0 || verb == L"taskview") switcher_command(verb, arg);
+    else if (!shell_real() && verb == L"desktop") toggle_desktop(); // Win+D's work, without the key (tests)
+    else if (!shell_real() && verb == L"winkey") on_win_key(arg.size() == 1 ? (UINT)towupper(arg[0]) : arg == L"tab" ? VK_TAB : 0);
+    else if (!shell_real() && tray_command(verb, arg)) {
+    } else if (!shell_real() && (verb.compare(0, 6, L"switch") == 0 || verb == L"taskview")) switcher_command(verb, arg);
     else if (verb == L"crash" && !shell_real()) *(volatile int *)nullptr = 0; // tests: the restart after a crash
     else if (verb == L"tasks") { // what the bars show, into the log
         std::string s = "shell tasks:";
@@ -1365,7 +1365,6 @@ int shell_main(const std::wstring &cmd, bool quit_it, DWORD restarted) {
     if (!g_shell) return 1;
     g_msg_taskbar_created = RegisterWindowMessageW(L"TaskbarCreated");
     ChangeWindowMessageFilterEx(g_shell, g_msg_taskbar_created, MSGFLT_ALLOW, NULL);
-    ChangeWindowMessageFilterEx(g_shell, WM_COPYDATA, MSGFLT_ALLOW, NULL); // Everything's answers to Start (it may run elevated)
     // the notification area: ours as the session's shell (explorer's alongside it); a test gets its own class
     tray_start(g_mode == M_SHELL ? TRAY_SHELL : g_mode == M_TEST ? TRAY_TEST : TRAY_NONE);
     if (g_mode == M_SHELL) {

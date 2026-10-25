@@ -1,5 +1,6 @@
 // surface.cpp: see surface.h.
 #include "surface.h"
+#include "util.h"
 #include <wincodec.h>
 #include <algorithm>
 #include <vector>
@@ -69,8 +70,9 @@ void surf_paint(Surface &s, void (*draw)(void *), void *ctx) {
     }
 }
 
-bool surf_shot(const std::vector<ShotPart> &parts, const std::wstring &png) {
-    if (!g_d2d || parts.empty()) return false;
+bool surf_shot(const std::vector<ShotPart> &parts, const std::wstring &name) {
+    std::wstring png = shot_path(name);
+    if (!g_d2d || parts.empty() || png.empty()) return false;
     IWICImagingFactory *wic = nullptr;
     CoCreateInstance(CLSID_WICImagingFactory, NULL, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&wic));
     if (!wic) return false;
