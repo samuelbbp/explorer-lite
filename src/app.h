@@ -15,10 +15,14 @@ enum {
     WM_APP_ICONS,             // icons of programs and shortcuts in a folder just listed (folder.cpp)
     WM_APP_CHANGED,           // something changed in the folder a window shows (SHChangeNotifyRegister)
     WM_APP_THUMB,             // a thumbnail made (thumbs.cpp)
-    WM_APP_KEYS,              // Win+E or Ctrl+Shift+Esc (keys.cpp)
+    WM_APP_KEYS,              // Win+E or Ctrl+Shift+Esc (keys.cpp); the Win key alone in the shell
+    WM_APP_APPBAR,            // a taskbar's appbar notifications (shell.cpp)
+    WM_APP_APPS,              // Start's list of apps, made on its thread (start.cpp)
 };
 
 enum Tab { TAB_FILES, TAB_TASKS };
+
+const ULONG_PTR kCopyCommand = 0x454C; // WM_COPYDATA dwData: a command line for the resident (or the shell)
 
 // What a window shows and where: also what is saved to reopen it after an update.
 struct WindowSpec {
@@ -41,3 +45,5 @@ void window_command(const std::wstring &verb, const std::wstring &arg); // test 
 // The resident.
 void app_install_update();                 // saves the open windows and runs the downloaded installer
 void app_quit();                           // closes every window and the tray icon, and exits
+// `line` to the running process whose hidden window has class `cls` (looked for up to find_ms); see main.cpp
+int app_send(const std::wstring &cls, const std::wstring &line, bool quit, int find_ms);

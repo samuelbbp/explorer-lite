@@ -1,0 +1,20 @@
+# The same in the light theme: the taskbar with windows, and Start with a search.
+conf language=en
+conf theme=light
+conf pinned=C:\Windows\System32\notepad.exe|C:\Windows\regedit.exe
+start --tray
+sleep 2000
+shell
+sleep 3000
+send C:\Windows
+sleep 1500
+send --tasks
+sleep 3000
+shellshot bar-light
+shellcmd start
+sleep 3000
+startshot start-light
+shellcmd search no
+sleep 1500
+startshot start-search-light
+stop

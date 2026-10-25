@@ -8,4 +8,5 @@ C++ Win32 + Direct2D/DirectWrite, built with `zig c++`. Per-user install, no adm
 
 - Resident in the tray with almost no memory; windows open on demand
 - File explorer with the task manager inside (in progress)
+- Taskbar on every monitor (open windows grouped by app, pinned apps, clock) and Start with app search and power menu (`--shell`)
 - English and Spanish; dark theme; per-monitor DPI

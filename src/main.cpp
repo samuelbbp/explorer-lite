@@ -15,6 +15,9 @@
 //                                      with Windows and the folders' open verb
 //   explorer-lite.exe --everything <folder> <text>   a search through Everything, its results to the log (tests:
 //                                      Everything only answers windows on its own desktop, and this needs none)
+//   explorer-lite.exe --shell          the shell: a taskbar per monitor and Start (shell.cpp), a process of its own;
+//                                      with --cmd or --quit, a command for the running shell
+//   explorer-lite.exe --apps           the apps Start would list, to the log (tests)
 //   --instance <name>                  its own data folder, mutex and window classes (tests)
 #include "app.h"
 #include <shellapi.h>
@@ -25,6 +28,7 @@
 #include "gfx.h"
 #include "idioma.h"
 #include "keys.h"
+#include "shell.h"
 #include "update.h"
 
 HINSTANCE g_inst;
@@ -35,7 +39,6 @@ namespace {
 const UINT kTrayId = 1;
 const UINT_PTR kTimerUpdate = 1;
 const DWORD kFirstCheckMs = 30 * 1000, kCheckEveryMs = 4 * 60 * 60 * 1000;
-const ULONG_PTR kCopyCommand = 0x454C; // WM_COPYDATA dwData: a command line for the resident
 UINT g_msg_taskbar_created;
 bool g_tray_added;
 bool g_quitting;
@@ -48,7 +51,8 @@ std::wstring run_value() { return L"explorer-lite" + instance_suffix(); }
 // --- the command line ---------------------------------------------------------------------------
 
 struct Command {
-    bool tray = false, tasks = false, quit = false, updated = false, unregister = false, everything = false;
+    bool tray = false, tasks = false, quit = false, updated = false, unregister = false, everything = false, shell = false, apps = false;
+    DWORD restarted = 0; // --restarted <pid>: the shell that crashed (shell.cpp)
     std::wstring path, cmd, text;
 };
 
@@ -61,6 +65,9 @@ Command parse(int argc, wchar_t **argv) {
         else if (a == L"--quit") c.quit = true;
         else if (a == L"--updated") c.updated = true;
         else if (a == L"--unregister") c.unregister = true;
+        else if (a == L"--shell") c.shell = true;
+        else if (a == L"--apps") c.apps = true;
+        else if (a == L"--restarted" && i + 1 < argc) c.restarted = (DWORD)_wtoi(argv[++i]);
         else if (a == L"--instance" && i + 1 < argc) set_instance(argv[++i]);
         else if (a == L"--cmd" && i + 1 < argc) c.cmd = argv[++i];
         else if (a == L"--everything" && i + 2 < argc) {
@@ -470,30 +477,7 @@ void theme_menus() {
     if (flush) flush();
 }
 
-// Another explorer-lite of this instance is running: it gets the command. For --quit, waits until it exits.
-int send_to_running(const Command &c) {
-    HWND other = NULL;
-    for (int i = 0; i < 50 && !other; i++) { // it may still be starting
-        other = FindWindowW(host_class().c_str(), NULL);
-        if (!other) Sleep(100);
-    }
-    if (!other) return c.quit ? 0 : 1;
-    DWORD pid = 0;
-    GetWindowThreadProcessId(other, &pid);
-    HANDLE proc = OpenProcess(SYNCHRONIZE, FALSE, pid);
-    AllowSetForegroundWindow(pid); // the window it opens comes to the front
-    std::wstring s = serialize(c);
-    COPYDATASTRUCT cd = { kCopyCommand, (DWORD)(s.size() * sizeof(wchar_t)), (void *)s.c_str() };
-    DWORD_PTR res = 0;
-    SendMessageTimeoutW(other, WM_COPYDATA, 0, (LPARAM)&cd, SMTO_ABORTIFHUNG, 10000, &res);
-    int code = 0;
-    if (c.quit) {
-        code = 10;
-        if (proc && WaitForSingleObject(proc, 15000) != WAIT_OBJECT_0) code = 11; // still there: the installer kills it
-    }
-    if (proc) CloseHandle(proc);
-    return code;
-}
+int send_to_running(const Command &c) { return app_send(host_class(), serialize(c), c.quit, 5000); }
 
 LRESULT CALLBACK probe_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == WM_COPYDATA) {
@@ -529,6 +513,32 @@ int everything_probe(const Command &c) {
 
 } // namespace
 
+// The running process whose hidden window is of class `cls` gets `line` (WM_COPYDATA). For a quit, waits until it
+// exits: 10 if it did, 11 if it is still there (the installer kills it), 0 if none was running.
+int app_send(const std::wstring &cls, const std::wstring &line, bool quit, int find_ms) {
+    HWND other = NULL;
+    for (int waited = 0; !other; waited += 100) { // it may still be starting
+        other = FindWindowW(cls.c_str(), NULL);
+        if (other || waited >= find_ms) break;
+        Sleep(100);
+    }
+    if (!other) return quit ? 0 : 1;
+    DWORD pid = 0;
+    GetWindowThreadProcessId(other, &pid);
+    HANDLE proc = OpenProcess(SYNCHRONIZE, FALSE, pid);
+    AllowSetForegroundWindow(pid); // the window it opens comes to the front
+    COPYDATASTRUCT cd = { kCopyCommand, (DWORD)(line.size() * sizeof(wchar_t)), (void *)line.c_str() };
+    DWORD_PTR res = 0;
+    SendMessageTimeoutW(other, WM_COPYDATA, 0, (LPARAM)&cd, SMTO_ABORTIFHUNG, 10000, &res);
+    int code = 0;
+    if (quit) {
+        code = 10;
+        if (proc && WaitForSingleObject(proc, 15000) != WAIT_OBJECT_0) code = 11;
+    }
+    if (proc) CloseHandle(proc);
+    return code;
+}
+
 void app_install_update() {
     if (g_upd.state != UP_READY) return;
     save_session();
@@ -562,20 +572,28 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     Command cmd = parse(argc, argv);
     LocalFree(argv);
     if (cmd.everything) return everything_probe(cmd);
+    if (cmd.apps) {
+        start_list_probe();
+        return 0;
+    }
     if (cmd.unregister) {
         set_startup(false);
         folders_set(false);
         return 0;
     }
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    if (cmd.shell) return shell_main(cmd.cmd, cmd.quit, cmd.restarted);
+    // the installer's --quit: the shell goes too (and comes back with --updated), so nothing keeps the exe in use
+    int shell_quit = cmd.quit ? shell_quit_running() : 0;
 
     HANDLE mutex = CreateMutexW(NULL, TRUE, (L"Local\\explorer-lite" + instance_suffix()).c_str());
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
         int code = send_to_running(cmd);
         if (mutex) CloseHandle(mutex);
-        return code;
+        return code == 0 && shell_quit ? shell_quit : code;
     }
-    if (cmd.quit || !cmd.cmd.empty()) return 0; // nothing running
+    if (cmd.quit) return shell_quit; // no resident running (10 or 11 if the shell was)
+    if (!cmd.cmd.empty()) return 0;  // nothing running
 
     OleInitialize(NULL); // drag and drop, the shell's context menus and dialogs
     theme_apply();
@@ -598,6 +616,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     log_line("start " EXPLORER_LITE_VERSION " in " + std::to_string((int)since_process_start_ms()) + " ms");
 
     if (cmd.updated) {
+        shell_relaunch_after_update();
         if (!restore_session() && !cmd.tray) window_open(WindowSpec());
     } else {
         run(cmd);

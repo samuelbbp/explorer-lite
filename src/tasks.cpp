@@ -250,13 +250,6 @@ struct Service {
     DWORD state = 0, pid = 0, start = 0;
 };
 
-struct Startup {
-    std::wstring name, command, where;
-    bool enabled = true, editable = false;
-    HKEY approved_root = NULL;
-    std::wstring approved_key; // StartupApproved\Run or \StartupFolder
-};
-
 struct Hot { // what tasks_draw left clickable
     D2D1_RECT_F r;
     int id;
@@ -279,7 +272,7 @@ struct TasksView {
     float scroll = 0;
     int page = PG_PROCESSES;
     std::vector<Service> services;
-    std::vector<Startup> startup;
+    std::vector<StartupEntry> startup;
     D2D1_RECT_F list = {};
     std::vector<Hot> hots;
     bool collapsed[SEC_COUNT] = { false, false, false };
@@ -505,8 +498,10 @@ bool approved(HKEY root, const std::wstring &key, const std::wstring &name) {
     return (v[0] & 1) == 0;
 }
 
-void load_startup(TasksView *t) {
-    t->startup.clear();
+} // namespace
+
+std::vector<StartupEntry> startup_entries() {
+    std::vector<StartupEntry> out;
     const wchar_t *approved_base = L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\";
     struct RunKey {
         HKEY root;
@@ -530,7 +525,7 @@ void load_startup(TasksView *t) {
             nl = ARRAYSIZE(name);
             if (RegEnumValueW(h, i, name, &nl, NULL, &type, (BYTE *)&data[0], &dl2) != ERROR_SUCCESS) continue;
             data.resize(wcsnlen(data.c_str(), data.size()));
-            Startup s;
+            StartupEntry s;
             s.name = name;
             s.command = data;
             s.where = k.where;
@@ -538,7 +533,7 @@ void load_startup(TasksView *t) {
             s.approved_key = std::wstring(approved_base) + k.approved;
             s.enabled = approved(k.root, s.approved_key, s.name);
             s.editable = k.root == HKEY_CURRENT_USER; // the machine's need an administrator
-            t->startup.push_back(s);
+            out.push_back(s);
         }
         RegCloseKey(h);
     }
@@ -558,21 +553,27 @@ void load_startup(TasksView *t) {
         do {
             if (fd.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_HIDDEN)) continue;
             if (!_wcsicmp(fd.cFileName, L"desktop.ini")) continue;
-            Startup s;
+            StartupEntry s;
             s.name = fd.cFileName;
             s.command = dir + L"\\" + fd.cFileName;
+            s.folder = true;
             s.where = f.where;
             s.approved_root = f.root;
             s.approved_key = std::wstring(approved_base) + L"StartupFolder";
             s.enabled = approved(f.root, s.approved_key, s.name);
             s.editable = f.root == HKEY_CURRENT_USER;
-            t->startup.push_back(s);
+            out.push_back(s);
         } while (FindNextFileW(h, &fd));
         FindClose(h);
     }
+    return out;
 }
 
-void set_startup_enabled(Startup &s, bool on) {
+namespace {
+
+void load_startup(TasksView *t) { t->startup = startup_entries(); }
+
+void set_startup_enabled(StartupEntry &s, bool on) {
     if (!s.editable) return;
     HKEY h;
     if (RegCreateKeyExW(s.approved_root, s.approved_key.c_str(), 0, NULL, 0, KEY_SET_VALUE, NULL, &h, NULL) != ERROR_SUCCESS) return;
@@ -751,7 +752,7 @@ void context_menu(TasksView *t, HWND wnd) {
         add(MC_STOP, L"\xE71A", T(L"Stop"), s.state == SERVICE_RUNNING);
         add(MC_RESTART, L"\xE72C", T(L"Restart"), s.state == SERVICE_RUNNING);
     } else if (r.kind == 4) {
-        const Startup &s = t->startup[r.a];
+        const StartupEntry &s = t->startup[r.a];
         copy = s.command;
         add(MC_ENABLE, L"\xE73E", T(L"Enable"), s.editable && !s.enabled);
         add(MC_DISABLE, L"\xE711", T(L"Disable"), s.editable && s.enabled);
@@ -1314,7 +1315,7 @@ void draw_lists(TasksView *t, ID2D1RenderTarget *rt, ID2D1SolidColorBrush *br, I
                     }
             }
         } else if (row.kind == 4) {
-            const Startup &s = t->startup[row.a];
+            const StartupEntry &s = t->startup[row.a];
             text(rt, br, s.enabled ? L"\xE73A" : L"\xE739", D2D1::RectF(rr.left + 4, y, rr.left + 22, y + kRow), icons, s.enabled ? kAccent : kDim);
             text(rt, br, s.name, D2D1::RectF(rr.left + 26, y, x_cnt - 128, y + kRow), f, s.enabled ? kText : kDim);
             text_right(rt, br, s.where, D2D1::RectF(x_cnt - 120, y, x_mem - 6, y + kRow), small, kDim);
@@ -1471,7 +1472,7 @@ void tasks_click(TasksView *t, HWND wnd, float x, float y, bool dbl, bool right)
         return;
     }
     if (r.kind == 4 && x < t->list.left + 26) { // the box: enable or disable
-        Startup &s = t->startup[r.a];
+        StartupEntry &s = t->startup[r.a];
         set_startup_enabled(s, !s.enabled);
         return;
     }

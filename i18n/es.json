@@ -153,5 +153,22 @@
  "Network": "Red",
  "GPU": "GPU",
  "Suspended": "Suspendido",
- "Performance": "Rendimiento"
+ "Performance": "Rendimiento",
+ "New window": "Nueva ventana",
+ "Open": "Abrir",
+ "Unpin from taskbar": "Desanclar de la barra de tareas",
+ "Pin to taskbar": "Anclar a la barra de tareas",
+ "Close window": "Cerrar ventana",
+ "File explorer": "Explorador de archivos",
+ "Close the taskbar": "Cerrar la barra de tareas",
+ "Type to search apps": "Escribe para buscar aplicaciones",
+ "All apps": "Todas las aplicaciones",
+ "{0} results": "{0} resultados",
+ "Listing apps…": "Buscando aplicaciones…",
+ "No apps found": "No se encontraron aplicaciones",
+ "No apps match «{0}»": "Ninguna aplicación coincide con «{0}»",
+ "Lock": "Bloquear",
+ "Sleep": "Suspender",
+ "Sign out": "Cerrar sesión",
+ "Shut down": "Apagar"
 }
