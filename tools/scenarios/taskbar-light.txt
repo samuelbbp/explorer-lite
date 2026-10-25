@@ -1,0 +1,28 @@
+# The same pictures in the light theme: the bar's menu, the settings window, centered and left, a custom Start icon.
+conf language=en
+conf theme=light
+conf pinned=C:\Windows\System32\notepad.exe|C:\Windows\regedit.exe
+start --tray
+sleep 2000
+shell
+sleep 3000
+send C:\Windows
+sleep 1500
+send --tasks
+sleep 3000
+shellcmd barmenu
+sleep 500
+shellpng barmenushot menu-light
+shellcmd barmenupick 1
+sleep 2000
+png settingsshot settings-light
+shellshot bar-left-light
+cmd settingsset align 1
+sleep 1000
+shellshot bar-centered-light
+cmd settingsset icon {dir}\explorer-lite.ico
+sleep 1000
+shellshot bar-custom-icon-light
+png settingsshot settings-custom-light
+cmd settingsclose
+stop

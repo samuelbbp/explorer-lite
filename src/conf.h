@@ -6,3 +6,4 @@
 std::string conf_get(const char *key, const char *def = "");
 int conf_int(const char *key, int def);
 void conf_set(const char *key, const std::string &value);
+void conf_reload(); // another process wrote it (the resident's taskbar settings): read again on the next conf_get

@@ -48,3 +48,5 @@ void surf_forget(Surface &s, const Thumb *t); // t is about to be deleted
 
 // An icon's pixels (premultiplied BGRA, top-down) into t; false if it has none.
 bool icon_pixels(HICON icon, Thumb &t);
+// An image file (.png, .ico, anything WIC reads) fitted into px x px pixels, centred, into t; false if it cannot be read.
+bool image_pixels(const std::wstring &path, int px, Thumb &t);

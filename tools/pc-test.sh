@@ -28,6 +28,7 @@ trap cleanup EXIT
 pc cp build/explorer-lite.exe "$rel/explorer-lite.exe" >/dev/null
 pc cp tools/pc-run.ps1 "$rel/pc-run.ps1" >/dev/null
 pc cp "$steps" "$rel/steps.txt" >/dev/null
+pc cp res/explorer-lite.ico "$rel/explorer-lite.ico" >/dev/null # a picture the scenarios can use: {dir}\explorer-lite.ico
 
 echo "running $name in the user's session (own desktop)…"
 pc ps - <<EOF
