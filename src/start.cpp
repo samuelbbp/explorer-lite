@@ -2,8 +2,10 @@
 // closes; with nothing typed, every app by name. The apps are the shell's own Apps folder (FOLDERID_AppsFolder: what
 // Windows' Start lists, Store apps included, launched through IApplicationActivationManager) plus any Start menu
 // shortcut it lacks (%ProgramData% and %AppData% Microsoft\Windows\Start Menu\Programs), listed on a thread each time
-// Start opens. Below, the user and the power menu: lock, sleep, sign out, restart, shut down. Its window and icons go
-// when it closes; only the names stay (a few hundred strings).
+// Start opens. As you type, files and folders too, from Everything (the explorer's own search, folder.cpp), below the
+// apps: the most recently changed first, without Windows' and programs' own folders. Below, the user and the power
+// menu: lock, sleep, sign out, restart, shut down. Its window and icons go when it closes; only the names stay (a few
+// hundred strings).
 #include "shell.h"
 #include "app.h"
 #include <commctrl.h>
@@ -14,6 +16,7 @@
 #include <algorithm>
 #include <unordered_map>
 #include <vector>
+#include "folder.h"
 #include "gfx.h"
 #include "idioma.h"
 #include "keys.h"
@@ -36,6 +39,19 @@ struct App {
 
 enum Hit { H_NONE = -1, H_POWER = -2, H_USER = -3 }; // >= 0: a row of the list
 
+struct FileHit {
+    std::wstring name, target, folder;
+    bool dir;
+};
+
+enum RowKind { R_APP, R_FILE, R_HEAD, R_NOTE };
+struct Row {
+    int kind, idx; // idx: into g_apps or the files
+    std::wstring text; // headers and notes
+};
+bool pickable(const Row &r) { return r.kind == R_APP || r.kind == R_FILE; }
+const DWORD kMaxFiles = 30;
+
 struct StartWin {
     Surface s;
     HWND search = NULL;
@@ -44,6 +60,11 @@ struct StartWin {
     HMONITOR mon = NULL;
     bool sticky = false;
     std::vector<int> shown; // indexes into g_apps, in order
+    std::vector<FileHit> files; // Everything's answer to the query
+    std::vector<Row> rows;  // what the list shows: the apps, then the files
+    DWORD search_id = 0;    // the query whose answer is awaited (older answers are dropped)
+    double search_t0 = 0;
+    bool everything = true; // false: it is not running (a note says so)
     int sel = 0, hover = H_NONE, press = H_NONE;
     float scroll = 0;
     bool tracking = false;
@@ -194,13 +215,56 @@ void filter(StartWin *w) {
     }
     std::stable_sort(scored.begin(), scored.end(), [](const std::pair<int, int> &a, const std::pair<int, int> &b) { return a.first < b.first; });
     for (auto &s : scored) w->shown.push_back(s.second);
+    // the rows: the apps first, then the files and folders
+    w->rows.clear();
+    for (int i : w->shown) w->rows.push_back({ R_APP, i, L"" });
+    if (!q.empty()) {
+        if (w->shown.empty() && !g_apps.empty()) w->rows.push_back({ R_NOTE, 0, Tf(L"No apps match «{0}»", { w->query }) });
+        if (!w->files.empty()) {
+            w->rows.push_back({ R_HEAD, 0, T(L"Files and folders") });
+            for (int i = 0; i < (int)w->files.size(); i++) w->rows.push_back({ R_FILE, i, L"" });
+        } else if (!w->everything) w->rows.push_back({ R_NOTE, 0, T(L"Files: Everything is not running") });
+    }
     w->sel = 0;
+    while (w->sel < (int)w->rows.size() && !pickable(w->rows[w->sel])) w->sel++;
     w->scroll = 0;
+}
+
+// Everything's answer: the files below the apps (the selection stays where it was if it was on an app)
+void on_files(StartWin *w, const COPYDATASTRUCT *cds) {
+    std::vector<Item> items;
+    folder_search_items(cds, items);
+    w->files.clear();
+    for (const Item &it : items) w->files.push_back({ it.name, it.target, it.type, it.dir });
+    int sel = w->sel;
+    bool on_app = sel >= 0 && sel < (int)w->rows.size() && w->rows[sel].kind == R_APP;
+    float scroll = w->scroll;
+    filter(w);
+    if (on_app && sel < (int)w->rows.size()) w->sel = sel, w->scroll = scroll;
+    log_line("start: " + std::to_string(w->files.size()) + " files from Everything in " + std::to_string((int)(now_ms() - w->search_t0)) + " ms");
+}
+
+// the query to Everything, at once on each key (its answer comes in a few ms; a newer query makes the older moot)
+void search_files(StartWin *w) {
+    static DWORD ids;
+    std::wstring q = w->query;
+    while (!q.empty() && q.back() == L' ') q.pop_back();
+    if (q.empty()) {
+        w->search_id = 0;
+        w->files.clear();
+        return;
+    }
+    // Windows', programs' and the bin's own files are not what anyone looks for from Start
+    std::wstring full = q + L" !C:\\Windows\\ !\\AppData\\ !\\$Recycle.Bin\\ !C:\\ProgramData\\ !\"C:\\Program Files\"";
+    w->search_id = ++ids;
+    w->search_t0 = now_ms();
+    w->everything = folder_search(w->s.hwnd, w->search_id, L"", full, kMaxFiles, true);
+    if (!w->everything) w->search_id = 0;
 }
 
 void clamp_scroll(StartWin *w) {
     D2D1_RECT_F l = list_rect();
-    float max = std::max(0.f, w->shown.size() * kRowH - (l.bottom - l.top));
+    float max = std::max(0.f, w->rows.size() * kRowH - (l.bottom - l.top));
     w->scroll = std::max(0.f, std::min(max, w->scroll));
 }
 
@@ -212,11 +276,11 @@ void ensure_visible(StartWin *w) {
     clamp_scroll(w);
 }
 
-Thumb *icon_for(StartWin *w, const App &a) {
-    auto it = w->icons.find(a.target);
+Thumb *icon_for(StartWin *w, const std::wstring &target) {
+    auto it = w->icons.find(target);
     if (it != w->icons.end()) return it->second;
-    w->icons[a.target] = nullptr;
-    thumbs_request(shell_host(), kGenStart, a.target, kIconPx);
+    w->icons[target] = nullptr;
+    thumbs_request(shell_host(), kGenStart, target, kIconPx);
     return nullptr;
 }
 
@@ -244,22 +308,38 @@ void draw_start(void *ctx) {
     }
     // what the list is
     D2D1_RECT_F l = list_rect();
-    std::wstring label = w->query.empty() ? std::wstring(T(L"All apps")) : Tf(L"{0} results", { std::to_wstring(w->shown.size()) });
+    std::wstring label = w->query.empty() ? std::wstring(T(L"All apps")) : Tf(L"Apps ({0})", { std::to_wstring(w->shown.size()) });
     surf_text(s, label, D2D1::RectF(kPad, l.top - kLabelH, kW - kPad, l.top - 4), s.f_big, kText);
     s.dc->PushAxisAlignedClip(l, D2D1_ANTIALIAS_MODE_ALIASED);
     if (g_apps.empty()) surf_text(s, g_listing ? T(L"Listing apps…") : T(L"No apps found"), D2D1::RectF(kPad, l.top, kW - kPad, l.top + kRowH), s.f_ui, kDim);
-    else if (w->shown.empty()) surf_text(s, Tf(L"No apps match «{0}»", { w->query }), D2D1::RectF(kPad, l.top, kW - kPad, l.top + kRowH), s.f_ui, kDim);
     int first = (int)(w->scroll / kRowH);
-    for (int i = first; i < (int)w->shown.size(); i++) {
-        float y = l.top + i * kRowH - w->scroll;
+    float top = l.top + (g_apps.empty() ? kRowH : 0);
+    for (int i = first; i < (int)w->rows.size(); i++) {
+        float y = top + i * kRowH - w->scroll;
         if (y > l.bottom) break;
-        const App &a = g_apps[w->shown[i]];
+        const Row &row = w->rows[i];
         D2D1_RECT_F r = D2D1::RectF(l.left, y, l.right, y + kRowH);
+        if (row.kind == R_HEAD) {
+            surf_text(s, row.text, D2D1::RectF(kPad, y + 6, kW - kPad, y + kRowH), s.f_big, kText);
+            continue;
+        }
+        if (row.kind == R_NOTE) {
+            surf_text(s, row.text, D2D1::RectF(kPad, y, kW - kPad, y + kRowH), s.f_ui, kDim);
+            continue;
+        }
         if (i == w->sel) surf_round(s, r, 4, w->query.empty() && w->hover != i ? kHover : kSelect);
         else if (i == w->hover) surf_round(s, r, 4, kHover);
-        float cy = y + kRowH / 2;
-        surf_icon(s, icon_for(w, a), D2D1::RectF(r.left + 12, cy - kAppIcon / 2, r.left + 12 + kAppIcon, cy + kAppIcon / 2));
-        surf_text(s, a.name, D2D1::RectF(r.left + 12 + kAppIcon + 12, y, r.right - 12, y + kRowH), s.f_ui, kText);
+        float cy = y + kRowH / 2, tx = r.left + 12 + kAppIcon + 12;
+        if (row.kind == R_APP) {
+            const App &a = g_apps[row.idx];
+            surf_icon(s, icon_for(w, a.target), D2D1::RectF(r.left + 12, cy - kAppIcon / 2, r.left + 12 + kAppIcon, cy + kAppIcon / 2));
+            surf_text(s, a.name, D2D1::RectF(tx, y, r.right - 12, y + kRowH), s.f_ui, kText);
+        } else { // a file: its name, and the folder it is in below
+            const FileHit &f = w->files[row.idx];
+            surf_icon(s, icon_for(w, f.target), D2D1::RectF(r.left + 12, cy - kAppIcon / 2, r.left + 12 + kAppIcon, cy + kAppIcon / 2));
+            surf_text(s, f.name, D2D1::RectF(tx, y + 2, r.right - 12, cy + 1), s.f_ui, kText);
+            surf_text(s, f.folder, D2D1::RectF(tx, cy - 1, r.right - 12, y + kRowH - 3), s.f_small, kDim);
+        }
     }
     s.dc->PopAxisAlignedClip();
     // the user and the power menu
@@ -292,7 +372,9 @@ bool shutdown_privilege() {
     return ok;
 }
 
-void power(int what) {
+} // namespace
+
+void start_power(int what) {
     const char *names[] = { "", "lock", "sleep", "sign out", "restart", "shut down" };
     if (!shell_real()) { // a test instance never locks or turns anything off
         log_line(std::string("power: ") + names[what] + " (a test instance does nothing)");
@@ -321,6 +403,8 @@ void power(int what) {
     }
 }
 
+namespace {
+
 void power_menu(StartWin *w) {
     ShellMenu m(w->s.dpi);
     m.add(P_LOCK, L"\xE72E", T(L"Lock"));
@@ -334,36 +418,56 @@ void power_menu(StartWin *w) {
     w->sticky = false;
     if (!cmd) return;
     start_close();
-    power((int)cmd);
+    start_power((int)cmd);
 }
 
 // --- input -----------------------------------------------------------------------------------------------------------
 
 void launch(StartWin *w, int i) {
-    if (i < 0 || i >= (int)w->shown.size()) return;
-    std::wstring target = g_apps[w->shown[i]].target;
+    if (i < 0 || i >= (int)w->rows.size() || !pickable(w->rows[i])) return;
+    const Row &r = w->rows[i];
+    if (r.kind == R_APP) {
+        std::wstring target = g_apps[r.idx].target;
+        start_close();
+        shell_launch(target);
+        return;
+    }
+    FileHit f = w->files[r.idx];
     start_close();
-    shell_launch(target);
+    if (f.dir) shell_launch(exe_path(), L"\"" + f.target + L"\""); // a folder: in explorer-lite
+    else shell_launch(f.target);
 }
 
 int hit(StartWin *w, float x, float y) {
     if (surf_inside(power_rect(), x, y)) return H_POWER;
     D2D1_RECT_F l = list_rect();
     if (!surf_inside(l, x, y)) return H_NONE;
-    int i = (int)((y - l.top + w->scroll) / kRowH);
-    return i >= 0 && i < (int)w->shown.size() ? i : H_NONE;
+    float top = l.top + (g_apps.empty() ? kRowH : 0);
+    int i = (int)floorf((y - top + w->scroll) / kRowH);
+    return i >= 0 && i < (int)w->rows.size() && pickable(w->rows[i]) ? i : H_NONE;
+}
+
+// the next row that can be chosen, `d` rows away at least (headers and notes are skipped)
+int step_sel(StartWin *w, int d) {
+    int n = (int)w->rows.size(), i = std::max(0, std::min(n - 1, w->sel + d));
+    int dir = d < 0 ? -1 : 1;
+    while (i >= 0 && i < n && !pickable(w->rows[i])) i += dir;
+    if (i < 0 || i >= n) { // none that way: the nearest the other way
+        i = std::max(0, std::min(n - 1, w->sel + d));
+        while (i >= 0 && i < n && !pickable(w->rows[i])) i -= dir;
+    }
+    return i >= 0 && i < n ? i : w->sel;
 }
 
 bool on_key(StartWin *w, WPARAM key) {
-    int n = (int)w->shown.size();
     int page = std::max(1, (int)((list_rect().bottom - list_rect().top) / kRowH) - 1);
     switch (key) {
     case VK_ESCAPE: start_close(); return true;
     case VK_RETURN: launch(w, w->sel); return true;
-    case VK_DOWN: w->sel = std::min(n - 1, w->sel + 1); break;
-    case VK_UP: w->sel = std::max(0, w->sel - 1); break;
-    case VK_NEXT: w->sel = std::min(n - 1, w->sel + page); break;
-    case VK_PRIOR: w->sel = std::max(0, w->sel - page); break;
+    case VK_DOWN: w->sel = step_sel(w, 1); break;
+    case VK_UP: w->sel = step_sel(w, -1); break;
+    case VK_NEXT: w->sel = step_sel(w, page); break;
+    case VK_PRIOR: w->sel = step_sel(w, -page); break;
     default: return false;
     }
     if (w->sel < 0) w->sel = 0;
@@ -419,10 +523,18 @@ LRESULT CALLBACK start_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             std::wstring q(n, 0);
             GetWindowTextW(w->search, &q[0], n + 1);
             w->query = q;
-            filter(w);
+            search_files(w); // the files a few ms later (or the note that Everything is not running)
+            filter(w);       // the apps at once
             redraw(w);
         }
         return 0;
+    case WM_COPYDATA: { // Everything's answer
+        auto *cds = (COPYDATASTRUCT *)lp;
+        if (!cds || !w->search_id || cds->dwData != w->search_id) return FALSE;
+        on_files(w, cds);
+        redraw(w);
+        return TRUE;
+    }
     case WM_MOUSEMOVE: {
         int i = hit(w, GET_X_LPARAM(lp) / s, GET_Y_LPARAM(lp) / s);
         if (i != w->hover) {
@@ -544,6 +656,7 @@ void start_open(HMONITOR mon, bool sticky) {
     DWORD round = 2; // DWMWCP_ROUND (Windows 11; ignored before)
     DwmSetWindowAttribute(w->s.hwnd, 33 /* DWMWA_WINDOW_CORNER_PREFERENCE */, &round, sizeof(round));
     surf_formats(w->s);
+    ChangeWindowMessageFilterEx(w->s.hwnd, WM_COPYDATA, MSGFLT_ALLOW, NULL); // Everything may run elevated
     w->search = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 0, 0, 10, 10, w->s.hwnd, (HMENU)1, g_inst, NULL);
     SetWindowSubclass(w->search, edit_proc, 1, (DWORD_PTR)w);
     edit_style(w);

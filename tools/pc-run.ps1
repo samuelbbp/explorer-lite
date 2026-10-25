@@ -14,6 +14,7 @@
 #   shell <args>       starts the shell (explorer-lite.exe --instance test --shell <args>), not waited for
 #   shellcmd <verb> <arg>   = send --shell --cmd "<verb> <arg>" (a command for the shell)
 #   shellshot <name>   the shell's main taskbar into <out>\<name>.png; startshot <name>: Start (open) the same way
+#   shellpng <verb> <name>   the same through any of the shell's shot verbs (overflowshot, balloonshot, switchershot)
 #   shellmem <label>   the shell's memory, like mem
 #   logcheck <text>    an error unless the log has a line with <text> (what the app checked itself, e.g. filtertest)
 #   stop               ends the resident and the shell (and what they started)
@@ -105,6 +106,7 @@ try {
             'shellcmd' { Send "--shell --cmd `"$rest`"" }
             'shellshot' { Shot '--shell ' 'shot' $rest }
             'startshot' { Shot '--shell ' 'startshot' $rest }
+            'shellpng' { $v, $n = $rest -split ' ', 2; Shot '--shell ' $v $n }
             'shellmem' { Mem $shell $rest 'shell' }
             'logcheck' {
                 $log = Join-Path $data 'explorer-lite.log'

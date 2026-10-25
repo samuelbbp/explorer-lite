@@ -15,6 +15,7 @@ struct Surface {
     ID2D1RenderTarget *dc = nullptr;   // what is drawn on: rt, or a bitmap for a shot
     ID2D1SolidColorBrush *br = nullptr;
     IDWriteTextFormat *f_ui = nullptr, *f_ui_c = nullptr, *f_small = nullptr, *f_small_r = nullptr, *f_icon = nullptr, *f_big = nullptr;
+    IDWriteTextFormat *f_wrap = nullptr, *f_bold = nullptr; // paragraphs (wrapped, from the top); a bold line
     std::unordered_map<const Thumb *, ID2D1Bitmap *> bmps; // the icons drawn, on dc
     bool shot = false;                 // drawing for a shot: the edit controls are not in the bitmap
 };
@@ -38,6 +39,7 @@ void surf_free(Surface &s);      // target, bitmaps and formats
 
 void surf_text(Surface &s, const std::wstring &t, D2D1_RECT_F r, IDWriteTextFormat *f, uint32_t rgb, float a = 1);
 float surf_text_width(Surface &s, const std::wstring &t, IDWriteTextFormat *f);
+float surf_text_height(const std::wstring &t, IDWriteTextFormat *f, float width); // wrapped at width
 void surf_fill(Surface &s, D2D1_RECT_F r, uint32_t rgb, float a = 1);
 void surf_round(Surface &s, D2D1_RECT_F r, float rad, uint32_t rgb, float a = 1);
 void surf_icon(Surface &s, const Thumb *t, D2D1_RECT_F r, float a = 1); // nothing if t is null or empty

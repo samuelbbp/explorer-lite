@@ -2,10 +2,9 @@
 // rules, taskfilter.h), grouped by app and kept in step by WinEvents (no polling), pinned apps, a clock and the Start
 // button. Run alongside explorer, each bar is an appbar (SHAppBarMessage, answered by explorer's taskbar) so maximized
 // windows leave room; as the session's shell nobody answers that, so it sets each monitor's work area itself, as
-// ManagedShell does (AppBarManager.SetWorkArea). Then it also runs what starts with Windows, once per sign-in.
-//
-// The system tray (the Shell_TrayWnd protocol) is not here yet: explorer owns that class in the user's session, so it
-// cannot be tested alongside it. It will get a window of its own (tray.cpp) that the bars leave room for.
+// ManagedShell does (AppBarManager.SetWorkArea), less what other programs' appbars take (tray.cpp answers them). Then
+// it also runs what starts with Windows, once per sign-in, owns the notification area (tray.cpp) and takes the Win key's
+// shortcuts and Alt+Tab (keys.cpp, switcher.cpp).
 #include "shell.h"
 #include "app.h"
 #include <dwmapi.h>
@@ -25,6 +24,7 @@
 #include "surface.h"
 #include "taskfilter.h"
 #include "tasks.h"
+#include "tray.h"
 #include "thumbs.h"
 #include "update.h"
 
@@ -55,7 +55,7 @@ struct Pin {
     Thumb *icon = nullptr;
 };
 
-enum BtnKind { B_START, B_TASK, B_PIN, B_CLOCK };
+enum BtnKind { B_START, B_TASK, B_PIN, B_CLOCK, B_TRAY };
 
 struct Btn {
     D2D1_RECT_F r;
@@ -85,6 +85,7 @@ UINT g_msg_taskbar_created;
 bool g_quitting;
 ULONGLONG g_started;
 DWORD g_restarted;         // the pid this one replaced after a crash (0: a normal start)
+std::vector<HWND> g_desktop_shown; // Win+D minimized these: the next Win+D brings them back
 const wchar_t *kBarClass = L"ExplorerLiteTaskbar"; // + instance_suffix(); never explorer's Shell_TrayWnd
 
 std::wstring shell_class() { return L"ExplorerLiteShell" + instance_suffix(); }
@@ -269,6 +270,7 @@ void check_fullscreen() {
                    r.bottom >= b->mrc.bottom;
         if (low == b->low) continue;
         b->low = low;
+        if (!low) tray_fullscreen_changed(); // balloons held back can show now
         SetWindowPos(b->s.hwnd, low ? HWND_NOTOPMOST : HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         if (low) SetWindowPos(b->s.hwnd, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     }
@@ -307,6 +309,7 @@ void CALLBACK on_event(HWINEVENTHOOK, DWORD ev, HWND h, LONG obj, LONG child, DW
         }
         return;
     case EVENT_OBJECT_DESTROY:
+        tray_window_gone(h);
         if (task_of(h)) schedule_scan();
         return;
     default: // created, shown, hidden, cloaked, uncloaked: only top-level windows matter
@@ -387,7 +390,8 @@ void layout(Bar *b) {
     float x = 4;
     b->btns.push_back({ D2D1::RectF(x, 2, x + kStartW, c.bottom - 2), B_START, 0 });
     x += kStartW + 4;
-    float right = c.right - kClockW - 8;
+    float tray_w = b->primary ? tray_width() : 0; // the notification area: the main bar's, before the clock
+    float right = c.right - kClockW - 8 - (tray_w ? tray_w + 4 : 0);
     // what goes on this bar, in order: pinned apps (their windows in their place) on the main one, then the rest
     std::vector<Btn> items;
     std::vector<bool> placed(g_tasks.size(), false);
@@ -414,6 +418,11 @@ void layout(Bar *b) {
         b->btns.push_back(it);
         x += bw;
     }
+    if (b->primary && tray_w) {
+        D2D1_RECT_F tr = D2D1::RectF(c.right - kClockW - 4 - tray_w, 0, c.right - kClockW - 4, c.bottom);
+        b->btns.push_back({ tr, B_TRAY, 0 });
+        tray_layout(b->s, tr);
+    } else if (b->primary) tray_layout(b->s, D2D1::RectF(c.right - kClockW - 4, 0, c.right - kClockW - 4, c.bottom));
     b->btns.push_back({ D2D1::RectF(c.right - kClockW - 4, 2, c.right - 4, c.bottom - 2), B_CLOCK, 0 });
     if (b->hover >= (int)b->btns.size()) b->hover = -1;
     if (b->press >= (int)b->btns.size()) b->press = -1;
@@ -473,6 +482,7 @@ void draw_bar(void *ctx) {
             surf_round(s, D2D1::RectF(mx, bt.r.bottom - 3, mx + mw, bt.r.bottom), 1.5f, active ? kAccent : kDim);
             break;
         }
+        case B_TRAY: tray_draw(s); break;
         case B_CLOCK: {
             if (hov) surf_round(s, bt.r, 4, kHover);
             float mid = (bt.r.top + bt.r.bottom) / 2;
@@ -585,6 +595,17 @@ void on_click(Bar *b, int i, int button) { // 0 left, 1 middle, 2 right
 
 // --- the bars: windows, appbars and the work area -------------------------------------------------------------------
 
+// the monitor less the bar and the appbars other programs put on it (the session's shell sets it, nobody else does)
+void set_work_area(Bar *b) {
+    RECT wa = b->mrc;
+    wa.bottom = b->rc.top;
+    wa = tray_work_area(b->mon, wa);
+    RECT now = {};
+    MONITORINFO mi = { sizeof(mi) };
+    if (GetMonitorInfoW(b->mon, &mi)) now = mi.rcWork;
+    if (!EqualRect(&now, &wa)) SystemParametersInfoW(SPI_SETWORKAREA, 0, &wa, SPIF_SENDCHANGE);
+}
+
 void place(Bar *b) {
     int h = MulDiv((int)kBarH, (int)b->s.dpi, 96);
     b->rc = b->mrc;
@@ -600,14 +621,11 @@ void place(Bar *b) {
         if (b->placed && EqualRect(&abd.rc, &b->rc)) return;
         SHAppBarMessage(ABM_SETPOS, &abd);
         b->rc = abd.rc;
-    } else if (g_mode == M_SHELL) {
-        RECT wa = b->mrc;
-        wa.bottom = b->rc.top;
-        SystemParametersInfoW(SPI_SETWORKAREA, 0, &wa, SPIF_SENDCHANGE);
-    }
+    } else if (g_mode == M_SHELL) set_work_area(b);
     b->placed = true;
     SetWindowPos(b->s.hwnd, b->low ? HWND_NOTOPMOST : HWND_TOPMOST, b->rc.left, b->rc.top, b->rc.right - b->rc.left, b->rc.bottom - b->rc.top,
                  SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    if (b->primary) tray_place(b->rc);
     layout(b);
     InvalidateRect(b->s.hwnd, NULL, FALSE);
 }
@@ -621,6 +639,7 @@ LRESULT CALLBACK bar_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_ERASEBKGND: return 1;
     case WM_MOUSEACTIVATE: return MA_NOACTIVATE; // the app in front stays in front
     case WM_MOUSEMOVE: {
+        if (b->primary) tray_mouse(msg, GET_X_LPARAM(lp) / s, GET_Y_LPARAM(lp) / s);
         int i = btn_at(b, GET_X_LPARAM(lp) / s, GET_Y_LPARAM(lp) / s);
         if (i != b->hover) {
             b->hover = i;
@@ -633,6 +652,7 @@ LRESULT CALLBACK bar_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
     case WM_MOUSELEAVE:
+        if (b->primary) tray_mouse(msg, 0, 0);
         b->tracking = false;
         b->hover = b->press = -1;
         InvalidateRect(h, NULL, FALSE);
@@ -640,12 +660,17 @@ LRESULT CALLBACK bar_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_LBUTTONDOWN:
     case WM_MBUTTONDOWN:
     case WM_RBUTTONDOWN:
+        if (b->primary && tray_mouse(msg, GET_X_LPARAM(lp) / s, GET_Y_LPARAM(lp) / s)) { // an app's icon: the app is told
+            b->press = -1;
+            return 0;
+        }
         b->press = btn_at(b, GET_X_LPARAM(lp) / s, GET_Y_LPARAM(lp) / s);
         InvalidateRect(h, NULL, FALSE);
         return 0;
     case WM_LBUTTONUP:
     case WM_MBUTTONUP:
     case WM_RBUTTONUP: {
+        if (b->primary && tray_mouse(msg, GET_X_LPARAM(lp) / s, GET_Y_LPARAM(lp) / s)) return 0;
         int i = btn_at(b, GET_X_LPARAM(lp) / s, GET_Y_LPARAM(lp) / s);
         bool same = i == b->press;
         b->press = -1;
@@ -694,6 +719,7 @@ BOOL CALLBACK add_monitor(HMONITOR mon, HDC, LPRECT, LPARAM) {
 }
 
 void bars_destroy() {
+    tray_detach();
     for (Bar *b : g_bars) {
         if (b->appbar) {
             APPBARDATA abd = { sizeof(abd) };
@@ -868,12 +894,120 @@ void filter_test() {
              std::to_string(failed) + " failed, " + std::to_string(skipped) + " skipped" + fails);
 }
 
+// --- the Win key's shortcuts ------------------------------------------------------------------------------------------
+
+// Win+D: every window minimized; again, they come back (unless one was brought back meanwhile: then all go again)
+void toggle_desktop() {
+    bool any_open = false;
+    for (const Task &t : g_tasks)
+        if (!IsIconic(t.hwnd)) any_open = true;
+    if (any_open) {
+        g_desktop_shown.clear();
+        for (const ShellWindow &w : shell_windows_by_use())
+            if (!IsIconic(w.hwnd)) {
+                g_desktop_shown.push_back(w.hwnd);
+                ShowWindowAsync(w.hwnd, SW_SHOWMINNOACTIVE);
+            }
+        log_line("keys: Win+D, " + std::to_string(g_desktop_shown.size()) + " windows minimized");
+        return;
+    }
+    for (auto it = g_desktop_shown.rbegin(); it != g_desktop_shown.rend(); ++it) // the last used ends in front
+        if (IsWindow(*it)) ShowWindowAsync(*it, SW_RESTORE);
+    if (!g_desktop_shown.empty() && IsWindow(g_desktop_shown.front())) SetForegroundWindow(g_desktop_shown.front());
+    log_line("keys: Win+D, " + std::to_string(g_desktop_shown.size()) + " windows back");
+    g_desktop_shown.clear();
+}
+
+// Win+R: Windows' own Run box (shell32's RunFileDlg, the one explorer opens: history, autocomplete, Browse)
+void run_box() {
+    static bool open;
+    if (open) return;
+    typedef void(WINAPI * PRun)(HWND, HICON, LPCWSTR, LPCWSTR, LPCWSTR, UINT);
+    HMODULE sh = GetModuleHandleW(L"shell32.dll");
+    auto run = sh ? (PRun)(void *)GetProcAddress(sh, (LPCSTR)61) : nullptr;
+    if (!run) return;
+    if (!shell_real()) { // modal: a test would wait for it forever
+        log_line("keys: Win+R (a test instance does not open it)");
+        return;
+    }
+    open = true;
+    run(NULL, NULL, NULL, NULL, NULL, 0);
+    open = false;
+}
+
+std::wstring terminal() { // Windows Terminal if it is there, else PowerShell
+    wchar_t found[MAX_PATH];
+    if (SearchPathW(NULL, L"wt.exe", NULL, MAX_PATH, found, NULL)) return found;
+    std::wstring wt = _wgetenv(L"LOCALAPPDATA") ? std::wstring(_wgetenv(L"LOCALAPPDATA")) + L"\\Microsoft\\WindowsApps\\wt.exe" : L"";
+    if (!wt.empty() && GetFileAttributesW(wt.c_str()) != INVALID_FILE_ATTRIBUTES) return wt;
+    return L"powershell.exe";
+}
+
+enum WinXCmd { WX_TASKS = 1, WX_SETTINGS, WX_TERMINAL, WX_FILES, WX_RUN, WX_LOCK, WX_SLEEP, WX_SIGNOUT, WX_RESTART, WX_SHUTDOWN };
+
+// Win+X: the system menu, above the Start button of the main bar
+void win_x() {
+    if (g_bars.empty()) return;
+    Bar *b = g_bars[0];
+    ShellMenu m(b->s.dpi);
+    m.add(WX_TASKS, L"\xE9D9", T(L"Task manager"));
+    m.add(WX_SETTINGS, L"\xE713", T(L"Settings"));
+    m.add(WX_TERMINAL, L"\xE756", T(L"Terminal"));
+    m.add(WX_FILES, L"\xE8B7", T(L"File explorer"));
+    m.add(WX_RUN, L"\xE8A7", T(L"Run"));
+    m.sep();
+    m.add(WX_LOCK, L"\xE72E", T(L"Lock"));
+    m.add(WX_SLEEP, L"\xE708", T(L"Sleep"));
+    m.add(WX_SIGNOUT, L"\xF3B1", T(L"Sign out"));
+    m.add(WX_RESTART, L"\xE777", T(L"Restart"));
+    m.add(WX_SHUTDOWN, L"\xE7E8", T(L"Shut down"));
+    POINT at = { b->rc.left + MulDiv(4, (int)b->s.dpi, 96), b->rc.top };
+    switch (m.show(b->s.hwnd, &at)) {
+    case WX_TASKS: shell_launch(exe_path(), L"--tasks"); break;
+    case WX_SETTINGS: shell_launch(L"ms-settings:"); break;
+    case WX_TERMINAL: shell_launch(terminal()); break;
+    case WX_FILES: shell_launch(exe_path()); break;
+    case WX_RUN: run_box(); break;
+    case WX_LOCK: start_power(1); break;
+    case WX_SLEEP: start_power(2); break;
+    case WX_SIGNOUT: start_power(3); break;
+    case WX_RESTART: start_power(4); break;
+    case WX_SHUTDOWN: start_power(5); break;
+    }
+}
+
+// Win+1..9: the main bar's nth app (pinned or open), as a click on it
+void win_number(int n) {
+    if (g_bars.empty()) return;
+    Bar *b = g_bars[0];
+    int seen = 0;
+    for (int i = 0; i < (int)b->btns.size(); i++)
+        if ((b->btns[i].kind == B_TASK || b->btns[i].kind == B_PIN) && ++seen == n) {
+            on_click(b, i, 0);
+            return;
+        }
+}
+
+void on_win_key(UINT vk) {
+    switch (vk) {
+    case 'D': toggle_desktop(); break;
+    case 'R': run_box(); break;
+    case 'X': win_x(); break;
+    case 'B': tray_overflow(true); break;
+    case VK_TAB: taskview_toggle(); break;
+    default:
+        if (vk >= '1' && vk <= '9') win_number((int)(vk - '0'));
+    }
+}
+
 // --- the shell's own window: commands, timers, Windows' broadcasts --------------------------------------------------
 
 void quit() {
     if (g_quitting) return;
     g_quitting = true;
     start_close();
+    switcher_command(L"switcherclose", L"");
+    tray_stop();
     keys_stop();
     hooks_stop();
     bars_destroy();
@@ -904,6 +1038,10 @@ void command(const std::wstring &line) {
     else if (verb == L"start") start_open(shell_primary(), true);
     else if (verb == L"startclose") start_close();
     else if (verb == L"filtertest") filter_test();
+    else if (verb == L"desktop") toggle_desktop(); // Win+D's work, without the key (tests)
+    else if (verb == L"winkey") on_win_key(arg.size() == 1 ? (UINT)towupper(arg[0]) : arg == L"tab" ? VK_TAB : 0);
+    else if (tray_command(verb, arg)) {
+    } else if (verb.compare(0, 6, L"switch") == 0 || verb == L"taskview") switcher_command(verb, arg);
     else if (verb == L"crash" && !shell_real()) *(volatile int *)nullptr = 0; // tests: the restart after a crash
     else if (verb == L"tasks") { // what the bars show, into the log
         std::string s = "shell tasks:";
@@ -932,6 +1070,7 @@ LRESULT CALLBACK shell_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             break;
         case kTimerClock:
             clock_timer();
+            tray_sweep(); // icons of apps that died without saying so
             redraw_all();
             break;
         case kTimerStartup: {
@@ -953,13 +1092,26 @@ LRESULT CALLBACK shell_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     case WM_APP_APPS: start_on_apps((void *)lp); return 0;
     case WM_APP_KEYS:
-        if (wp == KEY_START) {
+        switch (wp) {
+        case KEY_START: {
             HWND f = GetForegroundWindow();
             POINT pt;
             GetCursorPos(&pt);
             start_toggle(f && !bar_of(f) ? MonitorFromWindow(f, MONITOR_DEFAULTTONEAREST) : MonitorFromPoint(pt, MONITOR_DEFAULTTOPRIMARY));
+            break;
+        }
+        case KEY_WIN: on_win_key((UINT)lp); break;
+        case KEY_SWITCH: switcher_step((int)lp); break;
+        case KEY_SWITCH_DONE: switcher_done(); break;
+        case KEY_SWITCH_CANCEL: switcher_cancel(); break;
         }
         return 0;
+    case WM_SYSCOMMAND:
+        if ((wp & 0xFFF0) == SC_TASKLIST) { // Ctrl+Esc (we are the task manager window Windows knows of)
+            start_toggle(shell_primary());
+            return 0;
+        }
+        break;
     case WM_APP_THUMB: {
         Thumb *t = (Thumb *)lp;
         if (t->gen == kGenStart) {
@@ -1032,6 +1184,39 @@ LONG WINAPI on_crash(EXCEPTION_POINTERS *) {
 
 HWND shell_host() { return g_shell; }
 UINT shell_monitor_dpi(HMONITOR mon) { return monitor_dpi(mon); }
+std::wstring shell_process_path(DWORD pid) { return process_path(pid); }
+
+bool shell_fullscreen(HMONITOR mon) {
+    for (Bar *b : g_bars)
+        if (b->mon == mon) return b->low;
+    return false;
+}
+
+void shell_tray_changed() {
+    layout_all();
+    redraw_all();
+}
+
+void shell_work_area_update() {
+    if (g_mode != M_SHELL) return;
+    for (Bar *b : g_bars) set_work_area(b);
+}
+
+std::vector<ShellWindow> shell_windows_by_use() {
+    std::vector<HWND> all;
+    EnumWindows(collect, (LPARAM)&all); // top to bottom: the order they were last used
+    std::vector<ShellWindow> out;
+    for (HWND h : all) {
+        Task *t = task_of(h);
+        out.push_back({ h, t ? t->title : window_title(h), t ? t->icon : nullptr });
+    }
+    return out;
+}
+
+void shell_activate(HWND h) {
+    if (IsIconic(h)) ShowWindowAsync(h, SW_RESTORE);
+    SetForegroundWindow(h);
+}
 
 RECT shell_bar_rect(HMONITOR mon) {
     for (Bar *b : g_bars)
@@ -1070,9 +1255,10 @@ void ShellMenu::add(UINT id, const wchar_t *glyph, const std::wstring &label) {
 
 void ShellMenu::sep() { AppendMenuW(m, MF_SEPARATOR, 0, NULL); }
 
-UINT ShellMenu::show(HWND owner) {
+UINT ShellMenu::show(HWND owner, const POINT *at) {
     POINT pt;
     GetCursorPos(&pt);
+    if (at) pt = *at;
     SetForegroundWindow(owner); // without it the menu does not close when clicking elsewhere
     UINT cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY | TPM_BOTTOMALIGN, pt.x, pt.y, 0, owner, NULL);
     PostMessageW(owner, WM_NULL, 0, 0); // KB135788
@@ -1179,6 +1365,28 @@ int shell_main(const std::wstring &cmd, bool quit_it, DWORD restarted) {
     if (!g_shell) return 1;
     g_msg_taskbar_created = RegisterWindowMessageW(L"TaskbarCreated");
     ChangeWindowMessageFilterEx(g_shell, g_msg_taskbar_created, MSGFLT_ALLOW, NULL);
+    ChangeWindowMessageFilterEx(g_shell, WM_COPYDATA, MSGFLT_ALLOW, NULL); // Everything's answers to Start (it may run elevated)
+    // the notification area: ours as the session's shell (explorer's alongside it); a test gets its own class
+    tray_start(g_mode == M_SHELL ? TRAY_SHELL : g_mode == M_TEST ? TRAY_TEST : TRAY_NONE);
+    if (g_mode == M_SHELL) {
+        // The shell window (GetShellWindow): apps that start programs without their own rights ask it for its process.
+        // Hidden: the desktop itself (wallpaper, icons) is not drawn by explorer-lite yet. explorer.exe with a folder
+        // opens a folder window; bare, it still starts its own desktop and taskbar (it reads the machine's Shell
+        // setting, not this user's), which a Shell_TrayWnd or a shell window of ours does not stop.
+        typedef BOOL(WINAPI * PSetHwnd)(HWND);
+        HMODULE user = GetModuleHandleW(L"user32.dll");
+        auto set_shell = (PSetHwnd)(void *)GetProcAddress(user, "SetShellWindow");
+        auto set_taskman = (PSetHwnd)(void *)GetProcAddress(user, "SetTaskmanWindow");
+        if (!GetShellWindow() && set_shell) {
+            wc.lpfnWndProc = DefWindowProcW;
+            std::wstring dcls = L"ExplorerLiteDesktop" + instance_suffix();
+            wc.lpszClassName = dcls.c_str();
+            RegisterClassExW(&wc);
+            HWND desk = CreateWindowExW(WS_EX_TOOLWINDOW, dcls.c_str(), L"explorer-lite desktop", WS_POPUP, 0, 0, 0, 0, NULL, NULL, g_inst, NULL);
+            log_line(std::string("shell: the shell window ") + (desk && set_shell(desk) ? "is ours" : "could not be set"));
+        }
+        if (set_taskman) set_taskman(g_shell); // the system's task list (SC_TASKLIST) comes here, as it went to explorer
+    }
 
     load_pins();
     bars_create();
@@ -1188,8 +1396,10 @@ int shell_main(const std::wstring &cmd, bool quit_it, DWORD restarted) {
     g_active = f ? GetAncestor(f, GA_ROOTOWNER) : NULL;
     clock_timer();
     SetTimer(g_shell, kTimerApps, 4000, NULL);
-    // the Win key: as the session's shell, or when asked for (conf start_key=1); never in a test instance
-    if (g_mode == M_SHELL || (g_mode == M_APPBAR && conf_get("start_key") == "1")) keys_start_win(g_shell, WM_APP_KEYS);
+    // the Win key, its shortcuts and Alt+Tab: as the session's shell, or alongside explorer when asked for (conf start_key=1,
+    // shell_keys=1); never in a test instance
+    keys_start_shell(g_shell, WM_APP_KEYS, g_mode == M_SHELL || (g_mode == M_APPBAR && conf_get("start_key") == "1"),
+                     g_mode == M_SHELL || (g_mode == M_APPBAR && conf_get("shell_keys") == "1"));
     // what starts with Windows: as the session's shell, once per sign-in; a test lists it without running anything
     if ((g_mode == M_SHELL && first_in_session()) || g_mode == M_TEST) SetTimer(g_shell, kTimerStartup, 1500, NULL);
     // files, the task manager and the tray icon: the resident (started if it is not running; a no-op if it is)

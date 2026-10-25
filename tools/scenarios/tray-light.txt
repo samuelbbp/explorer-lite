@@ -1,0 +1,35 @@
+# The same pictures in the light theme.
+conf language=en
+conf theme=light
+conf pinned=C:\Windows\System32\notepad.exe|C:\Windows\regedit.exe
+start --tray
+sleep 2000
+shell
+sleep 3000
+shellcmd traytest
+sleep 1500
+send C:\Windows
+sleep 1500
+send --tasks
+sleep 3000
+shellshot tray-bar-light
+shellpng balloonshot tray-balloon-light
+shellcmd overflow
+sleep 800
+shellpng overflowshot tray-overflow-light
+shellcmd overflowclose
+shellcmd switcher
+sleep 1000
+shellpng switchershot switcher-light
+shellcmd switcherclose
+shellcmd taskview
+sleep 1000
+shellpng switchershot taskview-light
+shellcmd switcherclose
+shellcmd start
+sleep 2500
+shellcmd search note
+sleep 1500
+startshot start-files-light
+shellcmd startclose
+stop

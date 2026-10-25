@@ -35,6 +35,9 @@ std::wstring lower(std::wstring s) {
 
 TypeInfo type_of(const std::wstring &name, bool dir) {
     std::wstring key = dir ? L"<dir>" : lower(PathFindExtensionW(name.c_str()));
+    // not an extension but part of a name (x.resources_31bf3856ad36, a hash, a version): a plain file, and one question
+    // to the shell for all of them instead of one each (thousands in a search: a fifth of a second)
+    if (key.size() > 9 || key.find_first_of(L"_- ") != std::wstring::npos) key.clear();
     AcquireSRWLockShared(&g_types_lock);
     auto it = g_types.find(key);
     bool found = it != g_types.end();
@@ -219,7 +222,7 @@ DWORD WINAPI list_thread(void *p) {
 
 const DWORD kQuery2W = 18;                                          // EVERYTHING_IPC_COPYDATA_QUERY2W
 const DWORD kReqName = 0x1, kReqPath = 0x2, kReqSize = 0x10, kReqModified = 0x40; // EVERYTHING_IPC_QUERY2_REQUEST_*
-const DWORD kSortName = 1, kFolder = 0x1, kMaxResults = 5000;
+const DWORD kSortName = 1, kSortModifiedNewest = 14, kFolder = 0x1; // EVERYTHING_IPC_SORT_*
 
 struct Query2 {
     DWORD reply_hwnd, reply_copydata_message, search_flags, offset, max_results, request_flags, sort_type;
@@ -230,7 +233,7 @@ HWND everything() { return FindWindowW(L"EVERYTHING_TASKBAR_NOTIFICATION", NULL)
 
 } // namespace
 
-bool folder_search(HWND wnd, DWORD id, const std::wstring &path, const std::wstring &text) {
+bool folder_search(HWND wnd, DWORD id, const std::wstring &path, const std::wstring &text, DWORD max, bool recent_first) {
     HWND ev = everything();
     if (!ev) {
         log_line("everything: not running");
@@ -242,9 +245,9 @@ bool folder_search(HWND wnd, DWORD id, const std::wstring &path, const std::wstr
     auto *qs = (Query2 *)buf.data();
     qs->reply_hwnd = (DWORD)(DWORD_PTR)wnd;
     qs->reply_copydata_message = id;
-    qs->max_results = kMaxResults;
+    qs->max_results = max;
     qs->request_flags = kReqName | kReqPath | kReqSize | kReqModified;
-    qs->sort_type = kSortName;
+    qs->sort_type = recent_first ? kSortModifiedNewest : kSortName;
     memcpy(qs + 1, q.c_str(), (q.size() + 1) * sizeof(wchar_t));
     COPYDATASTRUCT cds = { kQuery2W, (DWORD)buf.size(), buf.data() };
     DWORD_PTR res = 0;

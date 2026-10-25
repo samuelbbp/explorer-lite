@@ -21,6 +21,7 @@
 //   --instance <name>                  its own data folder, mutex and window classes (tests)
 #include "app.h"
 #include <shellapi.h>
+#include <algorithm>
 #include <cstring>
 #include <cwchar>
 #include "conf.h"
@@ -479,15 +480,51 @@ void theme_menus() {
 
 int send_to_running(const Command &c) { return app_send(host_class(), serialize(c), c.quit, 5000); }
 
+// the probe types the text one key at a time, as a window would ask: each answer timed with what the window does to it
+struct Probe {
+    std::wstring path, text;
+    size_t typed = 0;
+    int pass = 1;    // typed twice: the first time the file types are new to the process (a window's are not, after a while)
+    double t0 = 0, worst = 0;
+} g_probe;
+
+bool probe_next(HWND h) {
+    g_probe.typed++;
+    g_probe.t0 = now_ms();
+    return folder_search(h, (DWORD)(g_probe.pass * 1000 + g_probe.typed), g_probe.path, g_probe.text.substr(0, g_probe.typed));
+}
+
 LRESULT CALLBACK probe_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     if (msg == WM_COPYDATA) {
+        auto *cds = (COPYDATASTRUCT *)lp;
+        if (cds->dwData != g_probe.pass * 1000 + g_probe.typed) return FALSE;
+        double got = now_ms();
         std::vector<Item> items;
-        folder_search_items((COPYDATASTRUCT *)lp, items);
-        std::string line = "everything: " + std::to_string(items.size()) + " results";
-        for (size_t i = 0; i < items.size() && i < 5; i++) line += "; " + utf8(items[i].target) + (items[i].dir ? " (folder)" : " " + utf8(items[i].size));
-        log_line(line);
-        PostQuitMessage(0);
+        folder_search_items(cds, items);
+        folder_sort(items, 0, false);
+        double ms = now_ms() - g_probe.t0, ours = now_ms() - got;
+        g_probe.worst = std::max(g_probe.worst, ms);
+        std::string line = "everything: \"" + utf8(g_probe.text.substr(0, g_probe.typed)) + "\" " + std::to_string(items.size()) + " results in " +
+                           std::to_string((int)(ms + 0.5)) + " ms (" + std::to_string((int)(ours + 0.5)) + " ours)";
+        if (g_probe.typed == g_probe.text.size()) {
+            for (size_t i = 0; i < items.size() && i < 5; i++) line += "; " + utf8(items[i].target) + (items[i].dir ? " (folder)" : " " + utf8(items[i].size));
+            log_line(line);
+            log_line("everything: typing \"" + utf8(g_probe.text) + "\"" + (g_probe.pass == 1 ? "" : " again") + ", the slowest answer " +
+                     std::to_string((int)(g_probe.worst + 0.5)) + " ms");
+            if (g_probe.pass++ == 1) {
+                g_probe.typed = 0;
+                g_probe.worst = 0;
+                PostMessageW(h, WM_APP, 0, 0);
+            } else PostQuitMessage(0);
+        } else {
+            log_line(line);
+            PostMessageW(h, WM_APP, 0, 0); // the next key once Everything has its answer back (it waits on this one)
+        }
         return TRUE;
+    }
+    if (msg == WM_APP) {
+        if (!probe_next(h)) PostQuitMessage(2);
+        return 0;
     }
     if (msg == WM_TIMER) {
         log_line("everything: no answer");
@@ -504,7 +541,9 @@ int everything_probe(const Command &c) {
     wc.lpszClassName = L"ExplorerLiteProbe";
     RegisterClassExW(&wc);
     HWND h = CreateWindowExW(0, wc.lpszClassName, L"", 0, 0, 0, 0, 0, HWND_MESSAGE, NULL, g_inst, NULL);
-    if (!h || !folder_search(h, 1, c.path, c.text)) return 2;
+    g_probe.path = c.path;
+    g_probe.text = c.text;
+    if (!h || c.text.empty() || !probe_next(h)) return 2;
     SetTimer(h, 1, 5000, NULL);
     MSG m;
     while (GetMessageW(&m, NULL, 0, 0) > 0) DispatchMessageW(&m);
