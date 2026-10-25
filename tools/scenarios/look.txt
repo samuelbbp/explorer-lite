@@ -1,0 +1,16 @@
+# The window's look: no title bar (tabs at the top with the window buttons), This PC, dark and light themes.
+conf language=en
+start --tray
+sleep 2000
+send
+sleep 2000
+cmd size 1180x720
+cmd go This PC
+sleep 2500
+shot thispc-dark
+cmd go C:\Windows
+sleep 1500
+shot windows-dark
+cmd closeall
+sleep 1000
+stop

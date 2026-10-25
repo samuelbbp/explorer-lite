@@ -1,0 +1,38 @@
+# The Task manager in the light theme: Processes and every resource of the Performance page.
+conf language=en
+conf theme=light
+start --tray
+sleep 2000
+send
+sleep 2000
+cmd size 1280x800
+cmd tasks
+sleep 6000
+shot processes-light
+cmd taskpage 1
+sleep 3000
+shot perf-0-light
+cmd key 40
+sleep 700
+shot perf-1-light
+cmd key 40
+sleep 700
+shot perf-2-light
+cmd key 40
+sleep 700
+shot perf-3-light
+cmd key 40
+sleep 700
+shot perf-4-light
+cmd key 40
+sleep 700
+shot perf-5-light
+cmd key 40
+sleep 700
+shot perf-6-light
+cmd key 40
+sleep 700
+shot perf-7-light
+cmd closeall
+sleep 1000
+stop

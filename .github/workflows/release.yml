@@ -1,0 +1,209 @@
+# Releases of explorer-lite. Everything on ubuntu-latest: zig c++ cross-compiles it (just build), makensis and zip
+# package it (package.sh).
+#   push to main            -> release vX.Y.Z here (the repo is public), the latest one (the app updates to it);
+#                              "[skip release]" in the head commit skips it
+#   Run workflow on a branch with prerelease -> prerelease vX.Y.Z-<branch>.N, never the latest (the app only reads
+#                              releases/latest); same assets
+#   one trigger per job: a pull request's CI is ci.yml; a release removes the prereleases of branches already merged
+# Version and notes: .github/release.sh. Actions are pinned to a commit SHA (tag in a comment). Only the publish job
+# can write (contents: write, the workflow's own token), and it runs no third-party action that sees it.
+name: release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      prerelease:
+        description: Publish a prerelease vX.Y.Z-<branch>.N of this branch (not main)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# one run at a time per event and branch, never cancelled halfway: a half-published release is worse than a late one;
+# while one runs GitHub keeps only the newest waiting push, so back-to-back merges publish the latest main once
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'delete' && github.event.ref || github.head_ref || github.ref }}
+  cancel-in-progress: false
+
+env:
+  ZIG_VERSION: 0.16.0
+  RELEASES_REPO: justdiegocom/explorer-lite
+
+jobs:
+  build:
+    name: Build and test
+    # [skip release] skips the whole run (every job skipped), so dcbot sees the merge as not deployed instead of waiting for a release
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && !github.event.deleted && !contains(github.event.head_commit.message, '[skip release]'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      mode: ${{ steps.plan.outputs.mode }}
+      version: ${{ steps.plan.outputs.version }}
+      tag: ${{ steps.plan.outputs.tag }}
+      last: ${{ steps.plan.outputs.last }}
+      publish: ${{ steps.plan.outputs.publish }}
+    env:
+      MODE: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') && 'stable' || (github.event_name == 'workflow_dispatch' && inputs.prerelease) && 'prerelease' || 'ci' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # tags and history: version and notes
+          persist-credentials: false
+
+      - name: Version and notes
+        id: plan
+        run: |
+          echo "mode=$MODE" >> "$GITHUB_OUTPUT"
+          .github/release.sh plan "$MODE" "$RUNNER_TEMP/notes.md" | tee "$RUNNER_TEMP/plan.txt"
+          { echo "### $MODE"; echo '```'; cat "$RUNNER_TEMP/plan.txt"; echo '```'; cat "$RUNNER_TEMP/notes.md"; } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: just, makensis and zip
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends just nsis zip >/dev/null
+          echo "$(just --version), makensis $(makensis -VERSION), zig $(zig version)"
+
+      # the strings in the code are all listed (i18n/fuente.json) and every language has them all
+      - name: Translations (comprobar.py)
+        run: |
+          codes=()
+          for f in i18n/*.json; do
+            case ${f##*/} in fuente.json|lista.json) continue ;; esac
+            codes+=("$(basename "$f" .json)")
+          done
+          echo "checking: ${codes[*]}"
+          python3 i18n/comprobar.py "${codes[@]}"
+
+      - name: Build (just build, stamped with the version)
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+        run: just build "$VERSION"
+
+      - name: Package (package.sh)
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+        run: |
+          ./package.sh "$VERSION"
+          cd dist
+          for f in "explorer-lite-Setup-$VERSION.exe" "explorer-lite-$VERSION-windows-x64.zip"; do
+            test -s "$f"
+            grep -qE "^[0-9a-f]{64}  ${f//./\\.}\$" "$f.sha256"
+            sha256sum -c "$f.sha256"
+          done
+          cp "$RUNNER_TEMP/notes.md" notes.md
+          { echo '### Assets'; echo '```'; ls -l explorer-lite-*; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: steps.plan.outputs.publish == 'true'
+        with:
+          name: dist
+          path: |
+            dist/explorer-lite-*
+            dist/notes.md
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+  publish:
+    name: Publish
+    needs: build
+    if: needs.build.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write # the release and its tag vX.Y.Z
+    env:
+      VERSION: ${{ needs.build.outputs.version }}
+      TAG: ${{ needs.build.outputs.tag }}
+      LAST: ${{ needs.build.outputs.last }}
+      PRERELEASE: ${{ needs.build.outputs.mode == 'prerelease' }}
+      RELEASE_TOKEN: ${{ github.token }}
+    steps:
+      # a re-run after a failure halfway finds its own release already there and only does what is left
+      - name: Guards
+        run: |
+          if [ "$PRERELEASE" = true ]; then
+            [[ $VERSION == *-* && $GITHUB_REF != refs/heads/main ]] || { echo "::error::bad prerelease $VERSION on $GITHUB_REF"; exit 1; }
+          else
+            [[ $VERSION != *-* && $GITHUB_REF == refs/heads/main ]] || { echo "::error::bad release $VERSION on $GITHUB_REF"; exit 1; }
+            now=$(git ls-remote --tags --refs "https://github.com/$RELEASES_REPO.git" | sed 's#.*refs/tags/##' \
+              | { grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' || true; } | sed 's/^v//' | sort -t. -k1,1n -k2,2n -k3,3n | tail -n 1)
+            if [ "v$now" != "$LAST" ] && [ "v$now" != "$TAG" ]; then
+              echo "::error::$RELEASES_REPO went from $LAST to v$now during the build; not publishing $TAG"
+              exit 1
+            fi
+          fi
+          if GH_TOKEN=$RELEASE_TOKEN gh release view "$TAG" --repo "$RELEASES_REPO" >/dev/null 2>&1; then
+            echo "::notice::$TAG is already in $RELEASES_REPO (a re-run): not created again"
+            echo "EXISTS=true" >> "$GITHUB_ENV"
+          fi
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist
+
+      - name: Release
+        if: env.EXISTS != 'true'
+        run: |
+          cd dist
+          files=("explorer-lite-Setup-$VERSION.exe" "explorer-lite-Setup-$VERSION.exe.sha256" \
+            "explorer-lite-$VERSION-windows-x64.zip" "explorer-lite-$VERSION-windows-x64.zip.sha256")
+          for f in "${files[@]}"; do test -s "$f"; done
+          sha256sum -c "explorer-lite-Setup-$VERSION.exe.sha256" "explorer-lite-$VERSION-windows-x64.zip.sha256"
+          # gh uploads into a draft and publishes it at the end: the app never sees a release without its files
+          if [ "$PRERELEASE" = true ]; then flags=(--prerelease --latest=false); else flags=(--latest); fi
+          GH_TOKEN=$RELEASE_TOKEN gh release create "$TAG" "${files[@]}" --repo "$RELEASES_REPO" --target "$GITHUB_SHA" \
+            --title "explorer-lite $VERSION" --notes-file notes.md "${flags[@]}"
+
+      - name: Check what the app sees
+        run: |
+          GH_TOKEN=$RELEASE_TOKEN gh release view "$TAG" --repo "$RELEASES_REPO" --json isPrerelease,isDraft \
+            | jq -e --argjson pre "$PRERELEASE" '.isDraft == false and .isPrerelease == $pre' >/dev/null \
+            || { echo "::error::$TAG is not published with prerelease=$PRERELEASE"; exit 1; }
+          latest=$(GH_TOKEN=$RELEASE_TOKEN gh api "repos/$RELEASES_REPO/releases/latest" --jq .tag_name)
+          if [ "$PRERELEASE" = true ]; then
+            [ "$latest" != "$TAG" ] || { echo "::error::the prerelease $TAG became releases/latest"; exit 1; }
+          else
+            [ "$latest" = "$TAG" ] || { echo "::error::releases/latest is $latest, not $TAG"; exit 1; }
+          fi
+          exe=explorer-lite-Setup-$VERSION.exe; d=$RUNNER_TEMP/check; mkdir -p "$d"
+          for f in "$exe" "$exe.sha256"; do
+            curl -sSfL --retry 3 -o "$d/$f" "https://github.com/$RELEASES_REPO/releases/download/$TAG/$f"
+          done
+          (cd "$d" && sha256sum -c "$exe.sha256")
+          { echo "### Published $TAG"; echo "- prerelease: $PRERELEASE, releases/latest: $latest"; } >> "$GITHUB_STEP_SUMMARY"
+
+      # where the next release's notes start (.github/release.sh); GITHUB_TOKEN tags trigger no workflow
+      - name: Source tag
+        if: env.PRERELEASE != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --jq .object.sha 2>/dev/null); then
+            [ "$sha" = "$GITHUB_SHA" ] || { echo "::error::$TAG already tags $sha here, not $GITHUB_SHA"; exit 1; }
+            echo "$TAG already tags $GITHUB_SHA"
+          else
+            gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$TAG" -f sha="$GITHUB_SHA" --jq .ref
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: env.PRERELEASE != 'true'
+        with:
+          fetch-depth: 0 # every branch, to tell the merged ones
+          persist-credentials: false
+          path: src
+
+      - name: Delete the prereleases of merged or deleted branches
+        if: env.PRERELEASE != 'true'
+        working-directory: src
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: .github/release.sh prune-merged

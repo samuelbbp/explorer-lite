@@ -1,0 +1,51 @@
+# The Task manager as the system's: Processes (totals over the columns, heat map), every resource of the Performance
+# page, Startup apps and Services; then the resident after closing it (pdh, dxgi and iphlpapi go with the tab).
+conf language=en
+start --tray
+sleep 2000
+mem resident
+# the first update check (30 s after start) loads winhttp and TLS for good: done before, so the last mem is the tab's
+sleep 35000
+mem resident-after-update-check
+send
+sleep 2000
+cmd size 1280x800
+cmd tasks
+sleep 6000
+shot processes-dark
+mem window-tasks
+cmd taskpage 1
+sleep 3000
+shot perf-0-dark
+cmd key 40
+sleep 700
+shot perf-1-dark
+cmd key 40
+sleep 700
+shot perf-2-dark
+cmd key 40
+sleep 700
+shot perf-3-dark
+cmd key 40
+sleep 700
+shot perf-4-dark
+cmd key 40
+sleep 700
+shot perf-5-dark
+cmd key 40
+sleep 700
+shot perf-6-dark
+cmd key 40
+sleep 700
+shot perf-7-dark
+mem window-perf
+cmd taskpage 2
+sleep 1000
+shot startup-dark
+cmd taskpage 3
+sleep 1500
+shot services-dark
+cmd closeall
+sleep 4000
+mem resident-after-window
+stop

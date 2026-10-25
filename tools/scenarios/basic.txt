@@ -1,0 +1,31 @@
+# The resident alone, a window (Home, a big folder, search, the task manager), and the resident again after closing it.
+start --tray
+sleep 2500
+mem resident
+send
+sleep 2500
+cmd size 1180x720
+sleep 500
+shot home
+mem window-home
+cmd go C:\Windows\System32
+sleep 2500
+shot system32
+mem window-system32
+cmd search shell
+sleep 500
+shot search
+cmd tasks
+sleep 5000
+shot tasks
+mem window-tasks
+cmd taskpage 3
+sleep 1500
+shot services
+cmd taskpage 2
+sleep 800
+shot startup
+cmd closeall
+sleep 4000
+mem resident-after-window
+stop
