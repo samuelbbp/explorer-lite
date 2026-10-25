@@ -112,6 +112,7 @@ struct Win {
     int mq_l0 = 0, mq_l1 = -1, mq_c0 = 0, mq_c1 = -1; // lines and columns applied last (l1 < l0: none)
     uint64_t mq_gen = 0;               // the listing it began on: another one ends it
     int mq_tab = 0;
+    bool mq_grid = false;              // and its layout (Ctrl+wheel may change it mid-drag)
 };
 
 enum { MQ_REPLACE, MQ_ADD, MQ_TOGGLE };
@@ -1184,7 +1185,7 @@ void mq_set(Win *w, View &v, int line, int c0, int c1, bool in) {
 // the view it began on, with the same listing (a refresh or another folder ends it)
 bool mq_valid(Win *w) {
     View &v = cur_view(w);
-    return w->cur == w->mq_tab && v.kind == TAB_FILES && v.gen == w->mq_gen && v.sel.size() == w->mq_before.size();
+    return w->cur == w->mq_tab && v.kind == TAB_FILES && v.gen == w->mq_gen && v.sel.size() == w->mq_before.size() && is_grid(v) == w->mq_grid;
 }
 
 void marquee_end(Win *w, bool cancel) {
@@ -1264,6 +1265,7 @@ void marquee_press(Win *w, float x, float y, int mode) {
     w->mq_l0 = w->mq_c0 = 0, w->mq_l1 = w->mq_c1 = -1;
     w->mq_gen = v.gen;
     w->mq_tab = w->cur;
+    w->mq_grid = is_grid(v);
     SetCapture(w->hwnd);
 }
 
@@ -1307,7 +1309,10 @@ void marquee_scroll(Win *w) {
     float was = v.scroll, step = std::max(4.f, std::min(20 * kRowH, std::fabs(d)));
     v.scroll += d < 0 ? -step : step;
     clamp_scroll(w, v);
-    if (v.scroll == was) return;
+    if (v.scroll == was) { // the end of the list: again when the pointer moves
+        KillTimer(w->hwnd, 9);
+        return;
+    }
     marquee_update(w);
     redraw(w);
 }
@@ -1836,6 +1841,7 @@ LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_ERASEBKGND: return 1;
     case WM_PAINT: paint(w); return 0;
     case WM_SIZE:
+        marquee_end(w, false); // its lines and columns were of the old layout
         if (w->rt) w->rt->Resize(D2D1::SizeU(LOWORD(lp), HIWORD(lp)));
         if (!w->views.empty()) {
             clamp_scroll(w, cur_view(w));
