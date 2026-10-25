@@ -58,6 +58,7 @@ struct View {
     bool loading = false;
     std::wstring error, filter;
     std::wstring select_after;         // after going up: the folder we came from is selected
+    std::wstring engine;               // who answered the search: Everything or Hurón
     bool rename_after = false;         // a new folder: renamed as soon as it shows up
     bool results = false;              // all holds Everything's results for the search, not the folder
     DWORD search_id = 0;               // the search whose answer this view waits for
@@ -995,7 +996,7 @@ void draw_status(Win *w, D2D1_RECT_F c) {
         size_t n = v.shown.size(), k = 0;
         for (int i : v.shown) k += v.sel[i] ? 1 : 0;
         left = n == 1 ? std::wstring(T(L"1 item")) : Tf(L"{0} items", { std::to_wstring(n) });
-        if (v.results) left = Tf(L"{0} found by Everything", { std::to_wstring(n) });
+        if (v.results) left = Tf(L"{0} found by {1}", { std::to_wstring(n), v.engine });
         if (k) left += L"   " + (k == 1 ? std::wstring(T(L"1 selected")) : Tf(L"{0} selected", { std::to_wstring(k) }));
         if (!v.filter.empty() && !v.results) left += L"   " + Tf(L"of {0}", { std::to_wstring(v.all.size()) });
     } else {
@@ -1704,7 +1705,7 @@ LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         break;
     case WM_DEVICECHANGE: w->drives = nav_drives(); redraw(w); return TRUE;
     case WM_APP_LIST: on_listing(w, (Listing *)lp); return 0;
-    case WM_COPYDATA: { // Everything's answer to a search
+    case WM_COPYDATA: { // the answer to a search (from Everything, or Hurón)
         auto *cds = (COPYDATASTRUCT *)lp;
         for (View &v : w->views) {
             if (!v.search_id || v.search_id != cds->dwData || v.filter.empty()) continue;
@@ -1712,6 +1713,7 @@ LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             folder_search_items(cds, v.all);
             folder_sort(v.all, v.sort, v.desc);
             v.results = true;
+            v.engine = folder_search_engine();
             v.loading = false;
             v.error.clear();
             v.sel.assign(v.all.size(), 0);

@@ -45,6 +45,9 @@ void folder_sort(std::vector<Item> &items, int col, bool desc);
 bool folder_search(HWND wnd, DWORD id, const std::wstring &path, const std::wstring &text, DWORD max = 5000, bool recent_first = false);
 // Everything's answer as items (their type column says the folder they are in)
 void folder_search_items(const COPYDATASTRUCT *cds, std::vector<Item> &items);
+// Who answers Everything's window: Everything itself, or Hurón (github.com/Windows-Lite/huron), which takes the same
+// queries; "" if neither is running.
+std::wstring folder_search_engine();
 
 // This PC: the drives with how full each one is. Its shell name, so the shell's menus and drops work on it too.
 extern const wchar_t kThisPC[];

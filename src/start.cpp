@@ -223,7 +223,7 @@ void filter(StartWin *w) {
         if (!w->files.empty()) {
             w->rows.push_back({ R_HEAD, 0, T(L"Files and folders") });
             for (int i = 0; i < (int)w->files.size(); i++) w->rows.push_back({ R_FILE, i, L"" });
-        } else if (!w->everything) w->rows.push_back({ R_NOTE, 0, T(L"Files: Everything is not running") });
+        } else if (!w->everything) w->rows.push_back({ R_NOTE, 0, T(L"Files: no file search is running (Hurón or Everything)") });
     }
     w->sel = 0;
     while (w->sel < (int)w->rows.size() && !pickable(w->rows[w->sel])) w->sel++;

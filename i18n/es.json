@@ -78,7 +78,7 @@
  "Language": "Idioma",
  "{0} free": "{0} libres",
  "New folder": "Nueva carpeta",
- "{0} found by Everything": "{0} encontrados por Everything",
+ "{0} found by {1}": "{0} encontrados por {1}",
  "Open in explorer-lite": "Abrir en explorer-lite",
  "Win+E and Ctrl+Shift+Esc open explorer-lite": "Win+E y Ctrl+Shift+Esc abren explorer-lite",
  "Open folders with explorer-lite": "Abrir las carpetas con explorer-lite",
@@ -174,7 +174,7 @@
  "Terminal": "Terminal",
  "Run": "Ejecutar",
  "Files and folders": "Archivos y carpetas",
- "Files: Everything is not running": "Archivos: Everything no está abierto",
+ "Files: no file search is running (Hurón or Everything)": "Archivos: no hay ningún buscador abierto (Hurón o Everything)",
  "Apps ({0})": "Aplicaciones ({0})",
  "No windows open": "No hay ventanas abiertas"
 }

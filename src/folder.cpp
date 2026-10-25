@@ -256,6 +256,24 @@ bool folder_search(HWND wnd, DWORD id, const std::wstring &path, const std::wstr
     return ok;
 }
 
+std::wstring folder_search_engine() {
+    HWND ev = everything();
+    if (!ev) return L"";
+    DWORD pid = 0;
+    GetWindowThreadProcessId(ev, &pid);
+    std::wstring name = L"Everything";
+    if (HANDLE p = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid)) {
+        wchar_t path[MAX_PATH];
+        DWORD n = MAX_PATH;
+        if (QueryFullProcessImageNameW(p, 0, path, &n)) {
+            const wchar_t *file = wcsrchr(path, L'\\');
+            if (file && !_wcsicmp(file + 1, L"Huron.exe")) name = L"Hur\u00f3n";
+        }
+        CloseHandle(p);
+    }
+    return name;
+}
+
 void folder_search_items(const COPYDATASTRUCT *cds, std::vector<Item> &items) {
     // EVERYTHING_IPC_LIST2: totitems, numitems, offset, request_flags, sort_type, then {flags, data_offset} per item
     const BYTE *base = (const BYTE *)cds->lpData, *end = base + cds->cbData;
